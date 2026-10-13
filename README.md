@@ -1,0 +1,30 @@
+# Cao Tốc Assist
+
+Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau để:
+
+- **Đo khoảng cách đến xe phía trước** trong làn của mình (COCO-SSD / TensorFlow.js).
+- **Nhận diện làn đường đang đi**: tô vùng làn, phân biệt vạch liền/đứt → làn trong cùng / giữa / ngoài cùng, đếm số làn khi chuyển làn, báo lệch làn.
+- **Cảnh báo âm thanh** khi khoảng cách nhỏ hơn mức an toàn theo tốc độ GPS (TT 38/2024/TT-BGTVT: 60 km/h → 35 m, ≤80 → 55 m, ≤100 → 70 m, ≤120 → 100 m) hoặc thời gian va chạm (TTC) < 4 s.
+
+## Cách tính khoảng cách
+
+1. Theo bề rộng xe: `D = f · W_thực / w_pixel` (ô tô 1,8 m; tải/khách 2,5 m), `f = (rộng ảnh/2) / tan(HFOV/2)`.
+2. Theo bề rộng làn 3,75 m tại hàng chân xe (không phụ thuộc loại xe).
+3. Khi cả hai hợp lý → trộn 60/40, làm mượt theo thời gian; nhân thêm hệ số hiệu chỉnh trong Cài đặt.
+
+## Triển khai (GitHub Pages)
+
+1. Repo → **Settings → Pages → Source: GitHub Actions**.
+2. Push lên `main` hoặc nhánh hiện tại → workflow `.github/workflows/pages.yml` tự deploy.
+   (Nếu deploy từ nhánh không phải mặc định bị chặn: Settings → Environments → `github-pages` → thêm nhánh vào *Deployment branches*.)
+3. Mở `https://<user>.github.io/app_giao_thong/` bằng Chrome Android → menu ⋮ → **Thêm vào màn hình chính**.
+
+Lần đầu cần mạng để tải TensorFlow.js + mô hình (~5 MB); sau đó được cache để dùng khi sóng yếu.
+
+## Sử dụng
+
+- Gắn điện thoại **nằm ngang, giữa kính lái**, camera nhìn thẳng. Cài đặt xong **trước khi chạy**.
+- ⚙ Cài đặt: HFOV camera, hệ số hiệu chỉnh, đường chân trời, che nắp capo, bật debug để thấy điểm dò vạch.
+- Hiệu chỉnh nhanh: đỗ xe sau một xe khác ở khoảng cách đo bằng thước (vd 10 m), chỉnh hệ số đến khi app hiển thị đúng.
+
+> Chỉ mang tính tham khảo, không thay thế quan sát của tài xế. Không thao tác điện thoại khi đang lái xe.
