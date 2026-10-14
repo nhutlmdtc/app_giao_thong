@@ -1,5 +1,5 @@
 // Cache app + thư viện + mô hình để dùng được khi sóng yếu trên cao tốc
-const CACHE = 'caotoc-v6';
+const CACHE = 'caotoc-v7';
 const SHELL = ['./', 'index.html', 'app.js', 'cars.js', 'sim3d.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
@@ -18,7 +18,9 @@ self.addEventListener('fetch', (e) => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  const isLib = /cdn\.jsdelivr\.net|storage\.googleapis\.com|tfhub\.dev|kaggle/.test(url.host);
+  // Thư viện, trọng số mô hình (CDN và models/ của app): cache-first, tải 1 lần
+  const isLib = /cdn\.jsdelivr\.net|storage\.googleapis\.com|tfhub\.dev|kaggle/.test(url.host) ||
+    (url.origin === location.origin && url.pathname.includes('/models/'));
   if (isLib) {
     // Thư viện & trọng số mô hình: cache-first
     e.respondWith(

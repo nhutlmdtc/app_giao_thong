@@ -2,7 +2,7 @@
 
 Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau để:
 
-- **Đo khoảng cách đến xe phía trước** trong làn của mình (COCO-SSD / TensorFlow.js).
+- **Đo khoảng cách đến xe phía trước** trong làn của mình. Nhận dạng xe bằng **YOLO11n** (TensorFlow.js, khung 320×576, ~5,3 MB float16, `models/yolo11n/`); không tải được thì dùng COCO-SSD.
 - **Nhận diện làn đường đang đi**: tô vùng làn, phân biệt vạch liền/đứt → làn trong cùng / giữa / ngoài cùng, đếm số làn khi chuyển làn, báo lệch làn.
 - **Màn hình mô phỏng phối cảnh 3D kiểu Tesla** (không hiện ảnh thật): làn đường, xe mình, xe trước, các xe làn bên, mốc mét và vùng màu an toàn trên mặt đường. Nút 📷 để xem ảnh thật khi hiệu chỉnh.
 - **Số chính là số giây cách xe trước** (khi có GPS), kèm số mét và khoảng cách an toàn; viền màn hình đổi xanh/vàng/đỏ.
@@ -41,3 +41,9 @@ Lần đầu cần mạng để tải TensorFlow.js + mô hình (~5 MB); sau đ�
 - Hiệu chỉnh nhanh: đỗ xe sau một xe khác ở khoảng cách đo bằng thước (vd 10 m), chỉnh hệ số đến khi app hiển thị đúng.
 
 > Chỉ mang tính tham khảo, không thay thế quan sát của tài xế. Không thao tác điện thoại khi đang lái xe.
+
+## Giấy phép
+
+Mô hình YOLO11n (`models/yolo11n/`) của Ultralytics theo giấy phép **AGPL-3.0**: khi phân phối app kèm mô hình này, mã nguồn app phải công khai theo AGPL-3.0. Muốn dùng trong sản phẩm đóng mã nguồn/thương mại cần mua Ultralytics Enterprise License.
+
+Mô hình được chuyển đổi: `yolo11n.pt` → ONNX (opset 17, 320×576) → onnx2tf → TensorFlow.js (float16).
