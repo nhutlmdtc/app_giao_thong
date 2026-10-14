@@ -9,48 +9,92 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon.svg">
 <style>
-  :root { --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --fg:#fff; --panel:rgba(0,0,0,.55); }
+  :root {
+    --bg:#0b0f14; --panel:rgba(255,255,255,.06); --fg:#f5f7fa; --dim:#94a3b8;
+    --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444; --accent:#38bdf8;
+  }
+  body[data-theme="night"] {
+    --bg:#000; --panel:rgba(255,255,255,.04); --fg:#fb923c; --dim:#9a5b2c;
+    --ok:#65a30d; --warn:#d97706; --bad:#dc2626; --accent:#c2410c;
+  }
   * { box-sizing:border-box; margin:0; padding:0; }
-  html,body { height:100%; background:#000; color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  html,body { height:100%; background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; overflow:hidden; -webkit-user-select:none; user-select:none; }
   #view { position:fixed; inset:0; width:100%; height:100%; display:block; }
   video { display:none; }
-  .hud { position:fixed; pointer-events:none; }
-  #dist { top:calc(env(safe-area-inset-top) + 10px); left:50%; transform:translateX(-50%); text-align:center; background:var(--panel); border-radius:16px; padding:8px 20px; min-width:180px; }
-  #distVal { font-size:56px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
-  #distSub { font-size:14px; opacity:.85; margin-top:4px; }
-  #lane { bottom:calc(env(safe-area-inset-bottom) + 12px); left:12px; background:var(--panel); border-radius:14px; padding:8px 14px; font-size:16px; max-width:55%; }
-  #laneName { font-size:22px; font-weight:700; }
-  #speed { bottom:calc(env(safe-area-inset-bottom) + 12px); right:12px; background:var(--panel); border-radius:14px; padding:8px 14px; text-align:right; }
-  #speedVal { font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
-  #status { top:calc(env(safe-area-inset-top) + 10px); left:12px; font-size:12px; opacity:.8; background:var(--panel); padding:4px 8px; border-radius:8px; }
-  #btnSet { position:fixed; top:calc(env(safe-area-inset-top) + 10px); right:12px; width:44px; height:44px; border-radius:50%; border:0; background:var(--panel); color:#fff; font-size:22px; }
-  .flash { animation:fl .5s infinite alternate; }
-  @keyframes fl { from { background:rgba(239,68,68,.85);} to { background:rgba(0,0,0,.55);} }
 
-  .sheet { position:fixed; inset:0; background:rgba(0,0,0,.92); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; }
+  .panel { position:fixed; background:var(--panel); border-radius:18px; padding:14px 16px; }
+  /* Ngang: trái = làn + tốc độ, giữa = mô phỏng, phải = khoảng cách */
+  #left  { left:calc(env(safe-area-inset-left) + 12px); top:12px; bottom:12px; width:27%; display:flex; flex-direction:column; gap:14px; }
+  #right { right:calc(env(safe-area-inset-right) + 12px); top:12px; bottom:12px; width:27%; display:flex; flex-direction:column; justify-content:center; text-align:center; }
+  @media (orientation: portrait) {
+    #left  { top:auto; bottom:12px; left:12px; right:12px; width:auto; height:auto; flex-direction:row; align-items:center; justify-content:space-between; }
+    #right { top:12px; bottom:auto; left:12px; right:12px; width:auto; }
+  }
+
+  .strip { display:flex; gap:6px; align-items:stretch; height:44px; }
+  .strip .ln { flex:1; max-width:36px; border:2px solid var(--dim); border-radius:6px; }
+  .strip .ln.me { background:var(--accent); border-color:var(--accent); }
+  .strip .bar { width:6px; background:var(--warn); border-radius:3px; }
+  .strip .more { color:var(--dim); font-size:22px; align-self:center; }
+  #laneName { font-size:22px; font-weight:800; line-height:1.15; }
+  #laneSub { font-size:14px; color:var(--dim); margin-top:4px; }
+  #speedBox { margin-top:auto; }
+  #speedVal { font-size:52px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
+  .unit { font-size:14px; color:var(--dim); }
+
+  #mainVal { white-space:nowrap; font-size:clamp(48px, 8.5vw, 104px); font-weight:900; line-height:1; font-variant-numeric:tabular-nums; }
+  #mainUnit { font-size:16px; color:var(--dim); margin-top:2px; }
+  #subVal { font-size:17px; font-weight:600; margin-top:12px; font-variant-numeric:tabular-nums; }
+  #alertTxt { font-size:22px; font-weight:900; margin-top:14px; min-height:28px; letter-spacing:.5px; }
+
+  .btns { position:fixed; top:12px; left:50%; transform:translateX(-50%); display:flex; gap:10px; }
+  .btns button { width:46px; height:46px; border-radius:50%; border:0; background:var(--panel); color:var(--fg); font-size:21px; }
+  #status { position:fixed; bottom:8px; left:50%; transform:translateX(-50%); font-size:12px; color:var(--dim); white-space:nowrap; }
+  @media (orientation: portrait) { .btns { top:auto; bottom:118px; } #status { bottom:auto; top:8px; } }
+
+  .sheet { position:fixed; inset:0; background:rgba(0,0,0,.92); display:flex; align-items:center; justify-content:center; padding:16px; z-index:10; color:#f5f7fa; }
   .sheet[hidden] { display:none; }
-  .card { width:100%; max-width:460px; max-height:100%; overflow:auto; background:#111; border:1px solid #333; border-radius:16px; padding:20px; }
+  .card { width:100%; max-width:480px; max-height:100%; overflow:auto; background:#111; border:1px solid #333; border-radius:16px; padding:20px; }
   .card h1 { font-size:22px; margin-bottom:10px; }
-  .card h2 { font-size:18px; margin-bottom:12px; }
+  .card h2 { font-size:18px; margin-bottom:6px; }
+  .card h3 { font-size:15px; margin:16px 0 2px; color:#38bdf8; }
   .card p, .card li { font-size:14px; line-height:1.5; opacity:.9; margin-bottom:8px; }
   .card ul { padding-left:18px; margin-bottom:12px; }
-  .card label { display:block; font-size:14px; margin:12px 0 4px; }
+  .card label { display:block; font-size:14px; margin:10px 0 4px; }
   .card input[type=range] { width:100%; }
-  .card .row { display:flex; justify-content:space-between; font-size:13px; opacity:.8; }
-  .card .chk { display:flex; gap:8px; align-items:center; }
+  .card select { width:100%; padding:8px; background:#222; color:#fff; border:1px solid #444; border-radius:8px; font-size:15px; }
+  .card .row { display:flex; justify-content:space-between; font-size:12px; opacity:.7; }
+  .card .chk { display:flex; gap:10px; align-items:center; }
+  .card .chk input { width:20px; height:20px; }
   button.primary { width:100%; margin-top:16px; padding:14px; font-size:17px; font-weight:700; border:0; border-radius:12px; background:#2563eb; color:#fff; }
   button.ghost { width:100%; margin-top:8px; padding:12px; font-size:15px; border:1px solid #444; border-radius:12px; background:transparent; color:#fff; }
 </style>
 </head>
-<body>
+<body data-theme="day">
 <video id="cam" playsinline muted></video>
 <canvas id="view"></canvas>
 
-<div id="status" class="hud">Đang khởi động…</div>
-<div id="dist" class="hud"><div id="distVal">--</div><div id="distSub">Chưa thấy xe phía trước</div></div>
-<div id="lane" class="hud"><div id="laneName">--</div><div id="laneSub">Đang dò vạch kẻ đường</div></div>
-<div id="speed" class="hud"><div id="speedVal">--</div><div style="font-size:12px;opacity:.8">km/h (GPS)</div></div>
-<button id="btnSet" aria-label="Cài đặt">⚙</button>
+<div id="left" class="panel">
+  <div id="strip" class="strip"></div>
+  <div>
+    <div id="laneName">--</div>
+    <div id="laneSub">Đang dò vạch kẻ đường</div>
+  </div>
+  <div id="speedBox"><div id="speedVal">--</div><div class="unit">km/h · GPS</div></div>
+</div>
+
+<div id="right" class="panel">
+  <div id="mainVal">--</div>
+  <div id="mainUnit">Chưa thấy xe phía trước</div>
+  <div id="subVal"></div>
+  <div id="alertTxt"></div>
+</div>
+
+<div class="btns">
+  <button id="btnCam" aria-label="Xem camera thật">📷</button>
+  <button id="btnSet" aria-label="Cài đặt">⚙</button>
+</div>
+<div id="status">Đang khởi động…</div>
 
 <div id="intro" class="sheet">
   <div class="card">
@@ -58,8 +102,8 @@
     <ul>
       <li>Gắn điện thoại lên giá đỡ, <b>camera sau nhìn thẳng ra kính lái</b>, nằm ngang, giữa xe.</li>
       <li>Cài đặt xong <b>trước khi chạy xe</b>. Không thao tác điện thoại khi đang lái.</li>
-      <li>Khoảng cách là <b>ước lượng</b> từ camera (sai số ~10–20%), chỉ để tham khảo, không thay thế quan sát của tài xế.</li>
-      <li>Có cảnh báo âm thanh khi khoảng cách nhỏ hơn mức an toàn theo Thông tư 38/2024/TT-BGTVT.</li>
+      <li>App cảnh báo bằng <b>giọng nói</b> — không cần nhìn màn hình.</li>
+      <li>Khoảng cách là <b>ước lượng</b> từ camera (sai số ~10–20%), chỉ để tham khảo.</li>
     </ul>
     <button id="btnStart" class="primary">Bắt đầu</button>
   </div>
@@ -67,22 +111,34 @@
 
 <div id="settings" class="sheet" hidden>
   <div class="card">
-    <h2>Cài đặt / hiệu chỉnh</h2>
+    <h2>Cài đặt</h2>
+
+    <h3>Cảnh báo</h3>
+    <label class="chk"><input id="voice" type="checkbox"> Giọng nói tiếng Việt</label>
+    <label class="chk"><input id="laneWarn" type="checkbox"> Nhắc khi lệch làn</label>
+    <label class="chk"><input id="beep" type="checkbox"> Tiếng bíp khi nguy hiểm</label>
+    <button id="btnTest" class="ghost">Thử giọng nói</button>
+
+    <h3>Hiển thị</h3>
+    <label>Giao diện</label>
+    <select id="theme">
+      <option value="auto">Tự động ngày/đêm theo ánh sáng</option>
+      <option value="day">Ban ngày</option>
+      <option value="night">Ban đêm</option>
+    </select>
+
+    <h3>Hiệu chỉnh camera</h3>
+    <p>Bấm 📷 để xem ảnh thật khi chỉnh các mục dưới.</p>
     <label>Góc nhìn ngang camera (HFOV): <b id="fovV"></b>°</label>
     <input id="fov" type="range" min="50" max="100" step="1">
     <div class="row"><span>Camera chính ~65–75°</span><span>Góc rộng ~95°+</span></div>
-
     <label>Hệ số hiệu chỉnh khoảng cách: <b id="calV"></b></label>
     <input id="cal" type="range" min="0.6" max="1.6" step="0.01">
     <div class="row"><span>App báo xa hơn thực → giảm</span><span>báo gần hơn → tăng</span></div>
-
-    <label>Đường chân trời (giới hạn vùng dò vạch): <b id="horV"></b>%</label>
+    <label>Đường chân trời: <b id="horV"></b>%</label>
     <input id="hor" type="range" min="30" max="70" step="1">
-
     <label>Che nắp capo (đáy khung hình): <b id="hoodV"></b>%</label>
     <input id="hood" type="range" min="0" max="35" step="1">
-
-    <label class="chk"><input id="beep" type="checkbox"> Cảnh báo âm thanh</label>
     <label class="chk"><input id="dbg" type="checkbox"> Hiện điểm dò vạch (debug)</label>
 
     <button id="btnClose" class="primary">Xong</button>

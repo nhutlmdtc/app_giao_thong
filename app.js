@@ -1,11 +1,15 @@
 'use strict';
 
 // ===== Cấu hình =====
-const DEFAULTS = { fov: 70, cal: 1.0, hor: 50, hood: 12, beep: true, dbg: false };
+const DEFAULTS = {
+  fov: 70, cal: 1.0, hor: 50, hood: 12,
+  voice: true, laneWarn: true, beep: true, theme: 'auto', dbg: false,
+};
 const VEHICLE_WIDTH = { car: 1.8, truck: 2.5, bus: 2.5, motorcycle: 0.8 }; // m
 const LANE_WIDTH_M = 3.75;      // làn xe cao tốc (TCVN 5729:2012)
 const LANE_W = 320;             // độ phân giải khung xử lý vạch kẻ
 const DETECT_MIN_SCORE = 0.4;
+const DETECT_INTERVAL_MS = 125; // ~8 lần/giây: đủ cho cao tốc, đỡ nóng máy
 
 let cfg = loadCfg();
 
@@ -39,8 +43,10 @@ const sctx = small.getContext('2d', { willReadFrequently: true });
 // ===== Trạng thái =====
 let model = null;
 let detections = [];          // [{cls, x, y, w, h}] toạ độ pixel video
-let lanes = { left: null, right: null, lost: 99 }; // line: {a, b, solid, cov} với x = a*y + b (toạ độ khung nhỏ)
+let tracks = [];              // xe đã ước lượng: {cls, D, lat, box, t}
+let lanes = { left: null, right: null, lost: 99 }; // line: {a, b, covS} với x = a*y + b (khung nhỏ)
 let laneIndex = null;         // 1 = làn sát dải phân cách
+let laneTotal = null;         // tổng số làn (biết khi đã từng thấy cả 2 mép đường)
 let prevOffset = null;
 let lead = null;              // {D, t, box}
 let closingSpeed = 0;         // m/s, > 0 là đang tiến lại gần
@@ -49,17 +55,25 @@ let audioCtx = null;
 let lastBeep = 0;
 let lastLevel = 'ok';
 let debugPts = [];
-let wakeLock = null;
+let showCamera = false;
+let brightness = 128;         // độ sáng trung bình khung hình (tự chuyển ngày/đêm)
+let departSince = 0;
 
 // ===== Khởi động =====
 $('btnStart').addEventListener('click', start);
 $('btnSet').addEventListener('click', () => { bindSettings(); $('settings').hidden = false; });
 $('btnClose').addEventListener('click', () => { $('settings').hidden = true; saveCfg(); });
 $('btnReset').addEventListener('click', () => { cfg = { ...DEFAULTS }; saveCfg(); bindSettings(); });
+$('btnTest').addEventListener('click', () => voice.say('test', 'Giữ khoảng cách. Đang ở làn 2.', 0, 3));
+$('btnCam').addEventListener('click', () => {
+  showCamera = !showCamera;
+  $('btnCam').style.outline = showCamera ? '2px solid var(--accent)' : '';
+});
 
 async function start() {
   $('intro').hidden = true;
   try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch {}
+  voice.unlock();
   try {
     await document.documentElement.requestFullscreen?.();
     await screen.orientation?.lock?.('landscape');
@@ -71,7 +85,8 @@ async function start() {
     status('Đang mở camera…');
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      // 640x360 là đủ: mô hình chỉ xử lý ~300x300, dò vạch 320 px
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 30, max: 30 } },
     });
     video.srcObject = stream;
     await video.play();
@@ -87,6 +102,8 @@ async function start() {
     await tf.setBackend('webgl').catch(() => {});
     model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
     status('Đang chạy · ' + tf.getBackend());
+    setTimeout(() => status(''), 4000);
+    voice.say('start', 'Bắt đầu theo dõi khoảng cách', 0, 1);
     detectLoop();
   } catch (e) {
     status('Lỗi tải mô hình (cần mạng lần đầu): ' + e.message);
@@ -96,7 +113,7 @@ async function start() {
 function status(t) { $('status').textContent = t; }
 
 async function requestWakeLock() {
-  try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+  try { await navigator.wakeLock?.request('screen'); } catch {}
 }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') requestWakeLock();
@@ -108,18 +125,55 @@ function startGps() {
     (p) => {
       const s = p.coords.speed;
       speedKmh = s == null || isNaN(s) ? null : s * 3.6;
-      $('speedVal').textContent = speedKmh == null ? '--' : Math.round(speedKmh);
     },
-    () => { $('speedVal').textContent = '--'; },
+    () => { speedKmh = null; },
     { enableHighAccuracy: true, maximumAge: 1000 }
   );
 }
 
+// ===== Giọng nói =====
+const voice = {
+  viVoice: null,
+  last: {},
+  curPriority: 0,
+  init() {
+    if (!('speechSynthesis' in window)) return;
+    const pick = () => {
+      const vs = speechSynthesis.getVoices();
+      this.viVoice = vs.find((v) => /^vi/i.test(v.lang)) || null;
+    };
+    pick();
+    speechSynthesis.addEventListener?.('voiceschanged', pick);
+  },
+  unlock() {
+    // Android cần 1 lần phát trong thao tác bấm của người dùng
+    try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch {}
+  },
+  // key: loại cảnh báo; cooldown: giây; priority: cao hơn thì ngắt câu đang đọc
+  say(key, text, cooldown, priority) {
+    if (!cfg.voice || !('speechSynthesis' in window)) return;
+    const now = performance.now() / 1000;
+    if (now - (this.last[key] || -1e9) < cooldown) return;
+    if (speechSynthesis.speaking) {
+      if (priority <= this.curPriority) return;
+      speechSynthesis.cancel();
+    }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'vi-VN';
+    if (this.viVoice) u.voice = this.viVoice;
+    u.rate = 1.1;
+    u.onend = () => { this.curPriority = 0; };
+    this.curPriority = priority;
+    this.last[key] = now;
+    speechSynthesis.speak(u);
+  },
+};
+voice.init();
+
 // ===== Nhận dạng xe (COCO-SSD) =====
-let fpsDet = 0;
 async function detectLoop() {
-  let last = performance.now();
   while (true) {
+    const t0 = performance.now();
     if (video.readyState >= 2) {
       try {
         const preds = await model.detect(video, 20, DETECT_MIN_SCORE);
@@ -127,25 +181,29 @@ async function detectLoop() {
           .filter((p) => VEHICLE_WIDTH[p.class])
           .map((p) => ({ cls: p.class, score: p.score, x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] }));
       } catch {}
-      updateLead();
+      updateTracks();
     }
-    const now = performance.now();
-    fpsDet = 0.9 * fpsDet + 0.1 * (1000 / Math.max(1, now - last));
-    last = now;
-    await new Promise((r) => setTimeout(r, 0));
+    const wait = DETECT_INTERVAL_MS - (performance.now() - t0);
+    await new Promise((r) => setTimeout(r, Math.max(0, wait)));
   }
 }
 
 // ===== Dò vạch kẻ đường =====
 function laneX(line, y) { return line.a * y + line.b; }
+function lanesOk() { return !!(lanes.left && lanes.right); }
 
 function detectLanes() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw) return;
   const W = LANE_W, H = Math.round((LANE_W * vh) / vw);
-  if (small.width !== W) { small.width = W; small.height = H; }
+  if (small.width !== W || small.height !== H) { small.width = W; small.height = H; }
   sctx.drawImage(video, 0, 0, W, H);
   const img = sctx.getImageData(0, 0, W, H).data;
+
+  // Độ sáng trung bình (lấy mẫu thưa) để tự chuyển giao diện ngày/đêm
+  let sum = 0, cnt = 0;
+  for (let i = 0; i < img.length; i += 4 * 97) { sum += img[i] + img[i + 1] + img[i + 2]; cnt += 3; }
+  brightness = brightness * 0.98 + (sum / cnt) * 0.02;
 
   const y0 = Math.round((cfg.hor / 100) * H) + 2;
   const y1 = Math.round((1 - cfg.hood / 100) * H) - 1;
@@ -155,9 +213,9 @@ function detectLanes() {
   const sx = W / vw;
   const boxes = detections.map((d) => [d.x * sx - 2, d.y * sx - 2, (d.x + d.w) * sx + 2, (d.y + d.h) * sx + 2]);
 
-  // Điểm tụ (vanishing point) từ khung trước, để quét từ "giữa xe" theo phối cảnh
+  // Điểm tụ từ khung trước, để quét từ "giữa xe" theo phối cảnh
   let vpX = W / 2;
-  if (lanes.left && lanes.right && lanes.right.a - lanes.left.a > 0.05) {
+  if (lanesOk() && lanes.right.a - lanes.left.a > 0.05) {
     const yv = (lanes.left.b - lanes.right.b) / (lanes.right.a - lanes.left.a);
     vpX = Math.min(W * 0.8, Math.max(W * 0.2, laneX(lanes.left, yv)));
   }
@@ -224,7 +282,6 @@ function fitLine(pts, sign, rows) {
     if (!bestIn || inl.length > bestIn.length) { bestIn = inl; best = { a, b }; }
   }
   if (!bestIn || bestIn.length < 6) return null;
-  // Bình phương tối thiểu trên inlier
   let sy = 0, sx = 0, syy = 0, sxy = 0;
   for (const [x, y] of bestIn) { sy += y; sx += x; syy += y * y; sxy += x * y; }
   const n = bestIn.length, den = n * syy - sy * sy;
@@ -248,7 +305,8 @@ function smoothLine(prev, cur) {
 function trackLaneChange() {
   const { left, right, W, y1 } = lanes;
   const xl = laneX(left, y1), xr = laneX(right, y1);
-  const offset = ((xl + xr) / 2 - W / 2) / (xr - xl); // >0: tâm làn lệch phải so với xe
+  const offset = ((xl + xr) / 2 - W / 2) / (xr - xl); // >0: xe lệch trái trong làn
+  const before = laneIndex;
   if (prevOffset != null && laneIndex != null) {
     if (prevOffset > 0.3 && offset < -0.3) laneIndex = Math.max(1, laneIndex - 1); // sang trái
     else if (prevOffset < -0.3 && offset > 0.3) laneIndex += 1;                   // sang phải
@@ -258,80 +316,92 @@ function trackLaneChange() {
   const ls = left.covS > 0.62, rs = right.covS > 0.62;
   lanes.leftSolid = ls; lanes.rightSolid = rs;
   if (ls) laneIndex = 1; // vạch liền bên trái = sát dải phân cách giữa
+  if (rs && laneIndex) laneTotal = laneIndex;
+  if (laneTotal && laneIndex > laneTotal) laneTotal = null;
+  if (before != null && laneIndex !== before) voice.say('lane', `Làn ${laneIndex}`, 3, 1);
+
+  // Lệch làn: lệch > 1/3 làn liên tục 1,2 s
+  const now = performance.now();
+  if (Math.abs(offset) > 0.33) {
+    if (!departSince) departSince = now;
+    else if (cfg.laneWarn && now - departSince > 1200) {
+      voice.say('depart', offset > 0 ? 'Xe đang lệch trái' : 'Xe đang lệch phải', 10, 2);
+    }
+  } else departSince = 0;
 }
 
 function laneLabel() {
-  if (!lanes.left || !lanes.right) return ['--', 'Đang dò vạch kẻ đường'];
+  if (!lanesOk()) return ['--', 'Đang dò vạch kẻ đường'];
   const { leftSolid: ls, rightSolid: rs } = lanes;
-  let name, sub;
+  let name;
   if (ls && rs) name = 'Làn duy nhất';
   else if (ls) name = 'Làn 1 · trong cùng';
   else if (rs) name = (laneIndex ? `Làn ${laneIndex} · ` : '') + 'ngoài cùng';
   else name = laneIndex ? `Làn ${laneIndex} · giữa` : 'Làn giữa';
-  sub = `Trái: ${ls ? 'liền' : 'đứt'} · Phải: ${rs ? 'liền' : 'đứt'}`;
-  const off = lanes.offset;
-  if (Math.abs(off) > 0.25) sub += off > 0 ? ' · lệch trái' : ' · lệch phải';
+  let sub = `Trái ${ls ? 'liền' : 'đứt'} · Phải ${rs ? 'liền' : 'đứt'}`;
+  if (Math.abs(lanes.offset) > 0.25) sub += lanes.offset > 0 ? ' · lệch trái' : ' · lệch phải';
   return [name, sub];
 }
 
-// ===== Xe phía trước & khoảng cách =====
+// ===== Ước lượng vị trí các xe =====
 function focalPx(imgW) { return imgW / 2 / Math.tan((cfg.fov * Math.PI) / 360); }
 
-function updateLead() {
+// Trả về {D: m phía trước, lat: lệch ngang theo đơn vị làn (0 = tâm làn mình, -1 = làn trái)}
+function estimate(d, vw) {
+  const sx = LANE_W / vw;
+  const bx = (d.x + d.w / 2) * sx, by = (d.y + d.h) * sx;
+  const cut = d.x < 2 || d.x + d.w > vw - 2; // bị cắt ở mép khung -> bề rộng sai
+  const Dw = cut ? null : (focalPx(vw) * VEHICLE_WIDTH[d.cls]) / d.w;
+  let Dl = null, lat = null;
+  if (lanesOk()) {
+    const xl = laneX(lanes.left, by), xr = laneX(lanes.right, by);
+    const wl = xr - xl;
+    if (by > lanes.y0 - 10 && wl > 4) Dl = (focalPx(LANE_W) * LANE_WIDTH_M) / wl;
+    if (wl > 4) lat = (bx - (xl + xr) / 2) / wl;
+  }
+  let D;
+  if (Dl && Dw) D = Dl / Dw > 0.6 && Dl / Dw < 1.6 ? 0.6 * Dl + 0.4 * Dw : Dw;
+  else D = Dw || Dl;
+  if (!D) return null;
+  D *= cfg.cal;
+  if (lat == null) lat = (((bx - LANE_W / 2) / focalPx(LANE_W)) * D) / LANE_WIDTH_M;
+  return { D, lat };
+}
+
+function updateTracks() {
   const vw = video.videoWidth;
   if (!vw) return;
-  const sx = LANE_W / vw;
-  let cand = null;
-  for (const d of detections) {
-    if (d.x < 2 || d.x + d.w > vw - 2) continue; // bị cắt ở mép khung -> bỏ
-    const bx = (d.x + d.w / 2) * sx, by = (d.y + d.h) * sx;
-    let inLane;
-    if (lanes.left && lanes.right) {
-      const xl = laneX(lanes.left, by), xr = laneX(lanes.right, by);
-      const m = (xr - xl) * 0.1;
-      inLane = bx > xl - m && bx < xr + m;
-    } else {
-      inLane = Math.abs(bx - LANE_W / 2) < LANE_W * 0.12 + d.w * sx * 0.3;
-    }
-    if (inLane && (!cand || d.y + d.h > cand.y + cand.h)) cand = d;
-  }
-
   const now = performance.now() / 1000;
-  if (!cand) { if (lead && now - lead.t > 1) lead = null; return; }
-
-  // (1) Theo bề rộng xe
-  const Dw = (focalPx(vw) * VEHICLE_WIDTH[cand.cls]) / cand.w;
-  // (2) Theo bề rộng làn tại hàng chân xe (không phụ thuộc loại xe)
-  let Dl = null;
-  if (lanes.left && lanes.right) {
-    const by = (cand.y + cand.h) * sx;
-    const wl = laneX(lanes.right, by) - laneX(lanes.left, by);
-    if (by > lanes.y0 - 10 && wl > 4) Dl = (focalPx(LANE_W) * LANE_WIDTH_M) / wl;
+  const next = [];
+  for (const d of detections) {
+    const e = estimate(d, vw);
+    if (!e) continue;
+    // Ghép với xe đã theo dõi để làm mượt
+    let m = null, best = Infinity;
+    for (const t of tracks) {
+      const cost = Math.abs(t.D - e.D) / Math.max(5, t.D) + Math.abs(t.lat - e.lat);
+      if (t.cls === d.cls && cost < 0.6 && cost < best) { best = cost; m = t; }
+    }
+    if (m) {
+      tracks.splice(tracks.indexOf(m), 1);
+      next.push({ cls: d.cls, box: d, t: now, D: m.D + (e.D - m.D) * 0.35, lat: m.lat + (e.lat - m.lat) * 0.35 });
+    } else next.push({ cls: d.cls, box: d, t: now, ...e });
   }
-  let D = Dl && Dl / Dw > 0.6 && Dl / Dw < 1.6 ? 0.6 * Dl + 0.4 * Dw : Dw;
-  D *= cfg.cal;
+  // Giữ xe vừa mất dấu tối đa 0,7 s
+  for (const t of tracks) if (now - t.t < 0.7) next.push(t);
+  tracks = next;
 
-  if (lead && Math.abs(D - lead.D) / lead.D < 0.35) {
-    const dt = Math.max(0.03, now - lead.t);
-    const Ds = lead.D + (D - lead.D) * 0.3;
-    closingSpeed = closingSpeed * 0.85 + ((lead.D - Ds) / dt) * 0.15;
-    lead = { D: Ds, t: now, box: cand };
-  } else {
-    lead = { D, t: now, box: cand };
-    closingSpeed = 0;
-  }
+  const cand = tracks.filter((t) => Math.abs(t.lat) < 0.55 && now - t.t < 0.7).sort((a, b) => a.D - b.D)[0];
+  if (!cand) { if (lead && now - lead.t > 1) { lead = null; closingSpeed = 0; } return; }
+
+  if (lead && Math.abs(cand.D - lead.D) / lead.D < 0.35) {
+    const dt = Math.max(0.05, now - lead.t);
+    closingSpeed = closingSpeed * 0.85 + ((lead.D - cand.D) / dt) * 0.15;
+  } else closingSpeed = 0;
+  lead = { D: cand.D, t: now, box: cand.box, track: cand };
 }
 
-// ===== Cảnh báo âm thanh =====
-function beep(freq, ms) {
-  if (!audioCtx || !cfg.beep) return;
-  const o = audioCtx.createOscillator(), gn = audioCtx.createGain();
-  o.frequency.value = freq; o.type = 'square';
-  gn.gain.value = 0.15;
-  o.connect(gn); gn.connect(audioCtx.destination);
-  o.start(); o.stop(audioCtx.currentTime + ms / 1000);
-}
-
+// ===== Mức cảnh báo =====
 function alertLevel() {
   if (!lead) return 'ok';
   const safe = safeDistance(speedKmh);
@@ -341,28 +411,206 @@ function alertLevel() {
   return 'ok';
 }
 
+function beep(freq, ms) {
+  if (!audioCtx || !cfg.beep) return;
+  const o = audioCtx.createOscillator(), gn = audioCtx.createGain();
+  o.frequency.value = freq; o.type = 'square';
+  gn.gain.value = 0.12;
+  o.connect(gn); gn.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime + ms / 1000);
+}
+
+function handleAlerts(level) {
+  const now = performance.now();
+  if (level === 'bad') {
+    if (now - lastBeep > 600) { beep(1200, 120); lastBeep = now; }
+    voice.say('bad', 'Nguy hiểm, giảm tốc', 4, 3);
+  } else if (level === 'warn' && lastLevel === 'ok') {
+    voice.say('warn', 'Giữ khoảng cách', 8, 2);
+  }
+  // Xe trước phanh gấp: đang tiến lại > 15 km/h trong tầm gần
+  const safe = safeDistance(speedKmh) || 50;
+  if (lead && closingSpeed > 4 && lead.D < safe * 1.5) voice.say('brake', 'Xe phía trước giảm tốc', 8, 2);
+  lastLevel = level;
+}
+
+// ===== Giao diện ngày/đêm =====
+function applyTheme() {
+  let t = cfg.theme;
+  if (t === 'auto') {
+    const cur = document.body.dataset.theme;
+    t = cur === 'night' ? (brightness > 75 ? 'day' : 'night') : (brightness < 55 ? 'night' : 'day');
+  }
+  if (document.body.dataset.theme !== t || !palette) {
+    document.body.dataset.theme = t;
+    const cs = getComputedStyle(document.body), v = (n) => cs.getPropertyValue(n).trim();
+    palette = { bg: v('--bg'), fg: v('--fg'), dim: v('--dim'), accent: v('--accent'), ok: v('--ok'), warn: v('--warn'), bad: v('--bad') };
+  }
+}
+let palette = null;
+
 // ===== Vẽ =====
-let frame = 0;
+let frame = 0, lastT = performance.now(), dashPhase = 0;
 function render() {
   requestAnimationFrame(render);
+  const now = performance.now(), dt = Math.min(0.1, (now - lastT) / 1000);
+  lastT = now;
   if (video.readyState < 2) return;
-  if (frame++ % 2 === 0) detectLanes();
+  if (frame++ % 3 === 0) detectLanes();
+  if (frame % 30 === 0) applyTheme();
 
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const cw = Math.round(innerWidth * dpr), ch = Math.round(innerHeight * dpr);
   if (view.width !== cw || view.height !== ch) { view.width = cw; view.height = ch; }
 
-  // object-fit: cover
+  const level = alertLevel();
+  const C = palette;
+  if (showCamera) drawCamera(cw, ch, dpr, level, C);
+  else drawSim(cw, ch, dpr, level, C, dt);
+
+  // Viền cả màn hình theo mức cảnh báo
+  if (level !== 'ok') {
+    const on = level === 'warn' || Math.floor(now / 250) % 2 === 0;
+    if (on) {
+      vctx.strokeStyle = C[level];
+      vctx.lineWidth = 14 * dpr;
+      vctx.strokeRect(0, 0, cw, ch);
+    }
+  }
+
+  handleAlerts(level);
+  updateHud(level, C);
+}
+
+// Mô phỏng nhìn từ trên xuống
+function drawSim(cw, ch, dpr, level, C, dt) {
+  const portrait = ch > cw;
+  vctx.fillStyle = C.bg;
+  vctx.fillRect(0, 0, cw, ch);
+
+  // Vùng đường
+  const rx0 = portrait ? cw * 0.04 : cw * 0.3, rx1 = portrait ? cw * 0.96 : cw * 0.7;
+  const ry0 = portrait ? ch * 0.27 : ch * 0.08, ry1 = portrait ? ch * 0.8 : ch * 0.97;
+  const cx = (rx0 + rx1) / 2;
+  const laneW = (rx1 - rx0) / 3.4;
+  const pxPerM = laneW / LANE_WIDTH_M; // ngang
+
+  const safe = safeDistance(speedKmh);
+  const maxD = Math.min(150, Math.max(60, (safe || 50) * 1.5, lead ? lead.D * 1.2 : 0));
+  const ew = 1.8 * pxPerM, egoLen = Math.min(ew * 2.1, (ry1 - ry0) * 0.16);
+  const egoY = ry1 - egoLen - 6 * dpr;
+  const yOf = (D) => egoY - (D / maxD) * (egoY - ry0);
+
+  const hasL = lanesOk();
+  const ls = hasL && lanes.leftSolid, rs = hasL && lanes.rightSolid;
+  const roadL = cx - laneW * (ls ? 0.5 : 1.5), roadR = cx + laneW * (rs ? 0.5 : 1.5);
+
+  // Dải phân cách / lề
+  if (ls) { vctx.fillStyle = 'rgba(148,163,184,.12)'; vctx.fillRect(rx0, ry0, roadL - rx0, ry1 - ry0); }
+  if (rs) { vctx.fillStyle = 'rgba(148,163,184,.06)'; vctx.fillRect(roadR, ry0, rx1 - roadR, ry1 - ry0); }
+
+  // Mặt đường
+  vctx.fillStyle = 'rgba(148,163,184,.16)';
+  vctx.fillRect(roadL, ry0, roadR - roadL, ry1 - ry0);
+
+  // Vùng màu khoảng cách trên làn mình
+  if (safe) {
+    const zones = [[0, safe * 0.6, C.bad], [safe * 0.6, safe, C.warn], [safe, maxD, C.ok]];
+    vctx.globalAlpha = 0.2;
+    for (const [a, b, col] of zones) {
+      vctx.fillStyle = col;
+      vctx.fillRect(cx - laneW / 2, yOf(Math.min(b, maxD)), laneW, yOf(a) - yOf(Math.min(b, maxD)));
+    }
+    vctx.globalAlpha = 1;
+  }
+
+  // Vạch kẻ: chạy theo tốc độ xe
+  dashPhase = (dashPhase + ((speedKmh || 0) / 3.6) * dt) % 12;
+  const drawLine = (x, solid, col) => {
+    vctx.strokeStyle = col;
+    vctx.lineWidth = 4 * dpr;
+    if (solid) {
+      vctx.beginPath(); vctx.moveTo(x, ry0); vctx.lineTo(x, ry1); vctx.stroke();
+    } else {
+      // vạch 5 m, hở 7 m (dài hơn thực tế để dễ nhìn khi thu nhỏ)
+      for (let m = -dashPhase; m < maxD + 12; m += 12) {
+        const ya = yOf(Math.max(0, m)), yb = yOf(Math.max(0, m + 5));
+        const y1c = Math.min(ya, ry1), y2c = Math.max(yb, ry0);
+        if (y1c <= y2c) continue;
+        vctx.beginPath(); vctx.moveTo(x, y1c); vctx.lineTo(x, y2c); vctx.stroke();
+      }
+    }
+  };
+  const yellow = '#facc15', white = C.fg;
+  drawLine(cx - laneW / 2, ls, ls ? yellow : white);
+  drawLine(cx + laneW / 2, rs, white);
+  if (!ls) drawLine(cx - laneW * 1.5, false, C.dim);
+  if (!rs) drawLine(cx + laneW * 1.5, false, C.dim);
+
+  // Thước mét
+  vctx.fillStyle = C.dim;
+  vctx.font = `${12 * dpr}px system-ui`;
+  vctx.textAlign = 'right';
+  for (let m = 20; m < maxD; m += 20) {
+    const y = yOf(m);
+    vctx.fillRect(roadL - 10 * dpr, y, 6 * dpr, 1 * dpr);
+    vctx.fillText(m + ' m', roadL - 14 * dpr, y + 4 * dpr);
+  }
+  vctx.textAlign = 'left';
+
+  // Xe khác
+  const now = performance.now() / 1000;
+  for (const t of tracks) {
+    if (now - t.t > 0.7 || t.D > maxD || Math.abs(t.lat) > 1.8) continue;
+    const isLead = lead && t === lead.track;
+    const x = cx + t.lat * laneW;
+    const w = VEHICLE_WIDTH[t.cls] * pxPerM;
+    const big = t.cls === 'truck' || t.cls === 'bus';
+    const len = Math.min((big ? 2.6 : t.cls === 'motorcycle' ? 2.1 : 2) * w, (ry1 - ry0) * (big ? 0.2 : 0.14));
+    drawCar(x, yOf(t.D), w, len, isLead ? C[level] : C.dim, dpr);
+    if (isLead) {
+      vctx.fillStyle = C[level];
+      vctx.font = `bold ${20 * dpr}px system-ui`;
+      vctx.fillText(t.D.toFixed(0) + ' m', x + w / 2 + 8 * dpr, yOf(t.D) - len / 2 + 8 * dpr);
+    }
+  }
+
+  // Xe mình (lệch trong làn theo offset)
+  const egoX = cx - (hasL ? lanes.offset : 0) * laneW;
+  drawCar(egoX, egoY + egoLen, ew, egoLen, C.accent, dpr);
+
+  if (!hasL) {
+    vctx.fillStyle = C.dim;
+    vctx.font = `${14 * dpr}px system-ui`;
+    vctx.textAlign = 'center';
+    vctx.fillText('Chưa thấy vạch kẻ đường', cx, ry0 + 20 * dpr);
+    vctx.textAlign = 'left';
+  }
+}
+
+// Xe dạng hộp bo góc; (x, y) là tâm đầu xe phía sau (đuôi xe)
+function drawCar(x, y, w, len, col, dpr) {
+  const r = Math.min(w, len) * 0.25;
+  const left = x - w / 2, top = y - len;
+  vctx.fillStyle = col;
+  vctx.beginPath();
+  vctx.roundRect ? vctx.roundRect(left, top, w, len, r) : vctx.rect(left, top, w, len);
+  vctx.fill();
+  vctx.fillStyle = 'rgba(0,0,0,.35)'; // kính
+  vctx.fillRect(left + w * 0.15, top + len * 0.22, w * 0.7, len * 0.18);
+  vctx.fillRect(left + w * 0.15, top + len * 0.68, w * 0.7, len * 0.12);
+}
+
+// Chế độ xem camera thật (để hiệu chỉnh)
+function drawCamera(cw, ch, dpr, level, C) {
   const vw = video.videoWidth, vh = video.videoHeight;
   const s = Math.max(cw / vw, ch / vh);
   const ox = (cw - vw * s) / 2, oy = (ch - vh * s) / 2;
   vctx.drawImage(video, ox, oy, vw * s, vh * s);
-
-  const k = vw / LANE_W; // khung nhỏ -> pixel video
+  const k = vw / LANE_W;
   const P = (x, y) => [ox + x * k * s, oy + y * k * s];
 
-  // Làn đường
-  if (lanes.left && lanes.right) {
+  if (lanesOk()) {
     const yt = lanes.y0, yb = lanes.H;
     const pts = [P(laneX(lanes.left, yt), yt), P(laneX(lanes.right, yt), yt), P(laneX(lanes.right, yb), yb), P(laneX(lanes.left, yb), yb)];
     vctx.fillStyle = 'rgba(34,197,94,0.22)';
@@ -375,56 +623,82 @@ function render() {
     }
     vctx.setLineDash([]);
   }
+  // Đường chân trời + vùng capo để dễ chỉnh
+  const H = lanes.H || Math.round((LANE_W * vh) / vw);
+  vctx.strokeStyle = '#0ff'; vctx.lineWidth = 2 * dpr;
+  vctx.setLineDash([8 * dpr, 8 * dpr]);
+  for (const yy of [(cfg.hor / 100) * H, (1 - cfg.hood / 100) * H]) {
+    const [, py] = P(0, yy);
+    vctx.beginPath(); vctx.moveTo(0, py); vctx.lineTo(cw, py); vctx.stroke();
+  }
+  vctx.setLineDash([]);
   if (cfg.dbg) {
     vctx.fillStyle = '#0ff';
     for (const [x, y] of debugPts) { const [px, py] = P(x, y); vctx.fillRect(px - 2, py - 2, 4, 4); }
-    const [hx, hy] = P(0, (cfg.hor / 100) * (lanes.H || 180)), [hx2] = P(LANE_W, 0);
-    vctx.strokeStyle = '#0ff'; vctx.beginPath(); vctx.moveTo(hx, hy); vctx.lineTo(hx2, hy); vctx.stroke();
   }
-
-  // Xe
-  const level = alertLevel();
-  const col = { ok: '#22c55e', warn: '#f59e0b', bad: '#ef4444' };
   for (const d of detections) {
     const isLead = lead && d === lead.box;
-    vctx.strokeStyle = isLead ? col[level] : 'rgba(255,255,255,0.5)';
+    vctx.strokeStyle = isLead ? C[level] : 'rgba(255,255,255,0.5)';
     vctx.lineWidth = (isLead ? 4 : 2) * dpr;
     vctx.strokeRect(ox + d.x * s, oy + d.y * s, d.w * s, d.h * s);
     if (isLead) {
       vctx.font = `bold ${22 * dpr}px system-ui`;
-      vctx.fillStyle = col[level];
+      vctx.fillStyle = C[level];
       vctx.fillText(lead.D.toFixed(0) + ' m', ox + d.x * s, oy + d.y * s - 8 * dpr);
     }
   }
-
-  updateHud(level);
 }
 
-function updateHud(level) {
-  const dv = $('distVal'), ds = $('distSub'), box = $('dist');
-  if (lead) {
-    dv.textContent = lead.D.toFixed(0) + ' m';
-    dv.style.color = level === 'bad' ? '#ef4444' : level === 'warn' ? '#f59e0b' : '#22c55e';
-    const safe = safeDistance(speedKmh);
-    const parts = [];
-    if (safe) parts.push(`An toàn ≥ ${Math.round(safe)} m`);
-    if (speedKmh > 5) parts.push(`${(lead.D / (speedKmh / 3.6)).toFixed(1)} s`);
-    if (closingSpeed > 0.5) parts.push(`đang gần lại ${(closingSpeed * 3.6).toFixed(0)} km/h`);
-    ds.textContent = parts.join(' · ') || 'Xe phía trước';
-  } else {
-    dv.textContent = '--'; dv.style.color = '#fff';
-    ds.textContent = 'Chưa thấy xe phía trước';
-  }
-  box.classList.toggle('flash', level === 'bad');
+// ===== HUD =====
+let hudCache = {};
+function setText(id, v) { if (hudCache[id] !== v) { hudCache[id] = v; $(id).textContent = v; } }
 
-  const now = performance.now();
-  if (level === 'bad' && now - lastBeep > 500) { beep(1200, 150); lastBeep = now; }
-  else if (level === 'warn' && lastLevel === 'ok') { beep(800, 200); lastBeep = now; }
-  lastLevel = level;
+function updateHud(level, C) {
+  const safe = safeDistance(speedKmh);
+  const moving = speedKmh != null && speedKmh > 5;
+  if (lead) {
+    if (moving) {
+      // Số chính là số giây cách xe trước
+      setText('mainVal', (lead.D / (speedKmh / 3.6)).toFixed(1) + ' s');
+      setText('mainUnit', 'cách xe phía trước');
+      setText('subVal', `${lead.D.toFixed(0)} m${safe ? ` · an toàn ≥ ${Math.round(safe)} m` : ''}`);
+    } else {
+      setText('mainVal', lead.D.toFixed(0) + ' m');
+      setText('mainUnit', 'cách xe phía trước');
+      setText('subVal', closingSpeed > 0.5 ? `đang gần lại ${(closingSpeed * 3.6).toFixed(0)} km/h` : '');
+    }
+  } else {
+    setText('mainVal', '--');
+    setText('mainUnit', 'Chưa thấy xe phía trước');
+    setText('subVal', '');
+  }
+  $('mainVal').style.color = lead ? C[level] : C.fg;
+  setText('alertTxt', level === 'bad' ? 'GIẢM TỐC!' : level === 'warn' ? 'GIỮ KHOẢNG CÁCH' : '');
+  $('alertTxt').style.color = C[level];
+
+  setText('speedVal', speedKmh == null ? '--' : String(Math.round(speedKmh)));
 
   const [n, sub] = laneLabel();
-  $('laneName').textContent = n;
-  $('laneSub').textContent = sub;
+  setText('laneName', n);
+  setText('laneSub', sub);
+
+  // Dải làn kiểu bản đồ
+  const key = `${lanesOk()}|${laneIndex}|${laneTotal}|${lanes.leftSolid}|${lanes.rightSolid}`;
+  if (hudCache.strip !== key) {
+    hudCache.strip = key;
+    let html = '';
+    if (lanesOk()) {
+      if (laneIndex) {
+        const total = laneTotal || laneIndex;
+        html += '<div class="bar"></div>';
+        for (let i = 1; i <= total; i++) html += `<div class="ln${i === laneIndex ? ' me' : ''}"></div>`;
+        html += laneTotal ? '' : '<div class="more">…</div>';
+      } else {
+        html += '<div class="more">…</div><div class="ln me"></div>' + (lanes.rightSolid ? '' : '<div class="more">…</div>');
+      }
+    }
+    $('strip').innerHTML = html;
+  }
 }
 
 // ===== Cài đặt =====
@@ -434,11 +708,15 @@ function bindSettings() {
     el.value = cfg[id]; out.textContent = cfg[id];
     el.oninput = () => { cfg[id] = parseFloat(el.value); out.textContent = el.value; };
   }
-  for (const id of ['beep', 'dbg']) {
+  for (const id of ['voice', 'laneWarn', 'beep', 'dbg']) {
     const el = $(id);
     el.checked = cfg[id];
     el.onchange = () => { cfg[id] = el.checked; };
   }
+  const th = $('theme');
+  th.value = cfg.theme;
+  th.onchange = () => { cfg.theme = th.value; applyTheme(); };
 }
 
+applyTheme();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
