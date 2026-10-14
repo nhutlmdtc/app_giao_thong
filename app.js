@@ -119,8 +119,8 @@ async function start() {
   try {
     status('Đang tải mô hình nhận dạng xe…');
     await tf.setBackend('webgl').catch(() => {});
-    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-    status('Đang chạy · ' + tf.getBackend());
+    model = await loadDetector();
+    status(`Đang chạy · ${model.name} · ${tf.getBackend()}`);
     setTimeout(() => status(''), 4000);
     voice.say('start', 'Bắt đầu theo dõi khoảng cách', 0, 1);
     detectLoop();
@@ -190,16 +190,60 @@ const voice = {
 };
 voice.init();
 
-// ===== Nhận dạng xe (COCO-SSD) =====
+// ===== Mô hình nhận dạng xe =====
+// Ưu tiên YOLO11n (models/yolo11n, giấy phép AGPL-3.0 của Ultralytics); lỗi thì dùng COCO-SSD bản rút gọn.
+const YOLO = { url: 'models/yolo11n/model.json', h: 320, w: 576, minScore: 0.35, iou: 0.5 };
+const YOLO_CLASSES = { 2: 'car', 3: 'motorcycle', 5: 'bus', 7: 'truck' };
+
+async function loadDetector() {
+  try {
+    const net = await tf.loadGraphModel(YOLO.url);
+    // Chạy thử 1 lần để biên dịch shader trước
+    tf.tidy(() => net.execute(tf.zeros([1, YOLO.h, YOLO.w, 3])));
+    return { name: 'YOLO11n', detect: (v) => yoloDetect(net, v) };
+  } catch (e) {
+    console.warn('Không tải được YOLO, dùng COCO-SSD:', e);
+    const coco = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+    return {
+      name: 'COCO-SSD',
+      detect: async (v) => (await coco.detect(v, 20, DETECT_MIN_SCORE))
+        .filter((p) => VEHICLE_WIDTH[p.class])
+        .map((p) => ({ cls: p.class, score: p.score, x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] })),
+    };
+  }
+}
+
+// Đầu ra YOLO: [1, 84, N] = 4 toạ độ (cx, cy, w, h) + 80 điểm lớp COCO; tự lọc lớp xe + NMS
+async function yoloDetect(net, v) {
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const ids = Object.keys(YOLO_CLASSES).map(Number);
+  const [boxes, scores, classes] = tf.tidy(() => {
+    const x = tf.image.resizeBilinear(tf.browser.fromPixels(v), [YOLO.h, YOLO.w]).div(255).expandDims(0);
+    let out = net.execute(x);
+    if (Array.isArray(out)) out = out[0];
+    const p = out.squeeze([0]).transpose();                      // [N, 84]
+    const [cx, cy, w, h] = tf.split(p.slice([0, 0], [-1, 4]), 4, 1);
+    const cls = tf.concat(ids.map((i) => p.slice([0, 4 + i], [-1, 1])), 1); // [N, 4] chỉ lớp xe
+    const b = tf.concat([cy.sub(h.div(2)), cx.sub(w.div(2)), cy.add(h.div(2)), cx.add(w.div(2))], 1); // y1,x1,y2,x2
+    return [b, cls.max(1), cls.argMax(1)];
+  });
+  const keep = await tf.image.nonMaxSuppressionAsync(boxes, scores, 30, YOLO.iou, YOLO.minScore);
+  // Chỉ kéo về CPU các ô được giữ lại
+  const sel = tf.tidy(() => [tf.gather(boxes, keep), tf.gather(scores, keep), tf.gather(classes, keep)]);
+  const [bArr, sArr, cArr] = await Promise.all([sel[0].array(), sel[1].data(), sel[2].data()]);
+  tf.dispose([boxes, scores, classes, keep, ...sel]);
+  const kx = vw / YOLO.w, ky = vh / YOLO.h;
+  return bArr.map(([y1, x1, y2, x2], i) =>
+    ({ cls: YOLO_CLASSES[ids[cArr[i]]], score: sArr[i], x: x1 * kx, y: y1 * ky, w: (x2 - x1) * kx, h: (y2 - y1) * ky }));
+}
+
+// ===== Vòng nhận dạng =====
 async function detectLoop() {
   while (true) {
     const t0 = performance.now();
     if (video.readyState >= 2) {
       try {
-        const preds = await model.detect(video, 20, DETECT_MIN_SCORE);
-        detections = preds
-          .filter((p) => VEHICLE_WIDTH[p.class])
-          .map((p) => ({ cls: p.class, score: p.score, x: p.bbox[0], y: p.bbox[1], w: p.bbox[2], h: p.bbox[3] }));
+        detections = await model.detect(video);
       } catch {}
       updateTracks();
     }
