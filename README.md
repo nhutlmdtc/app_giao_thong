@@ -8,6 +8,11 @@ Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau đ�
 - **Số chính là số giây cách xe trước** (khi có GPS), kèm số mét và khoảng cách an toàn; viền màn hình đổi xanh/vàng/đỏ.
 - **Cảnh báo giọng nói tiếng Việt**: "Giữ khoảng cách", "Nguy hiểm, giảm tốc", "Xe phía trước giảm tốc", "Xe đang lệch trái/phải", "Làn N".
 - **Tổng số làn và giới hạn tốc độ lấy từ bản đồ OpenStreetMap** theo vị trí GPS + hướng chạy (tách đúng nhánh cao tốc mỗi chiều). Tải dữ liệu bán kính 1,5 km, đi quá 1 km thì tải lại; mất mạng thì dùng cách dò vạch như cũ.
+- **Tên đường** (OpenStreetMap, khớp theo hướng chạy) và **xã/phường · tỉnh** (Nominatim, tra lại mỗi 2 km).
+- **Tự dò đường chân trời** từ điểm tụ của vạch kẻ, tự suy độ cao camera → đo khoảng cách theo mặt đường cho cả xe làn bên.
+- **Bộ lọc Kalman** cho khoảng cách và tốc độ tiến lại gần xe trước → ít cảnh báo nhầm.
+- **Nhắc vượt tốc độ** bằng giọng nói theo giới hạn trên bản đồ; **tự giảm tải khi pin < 20%** (không sạc).
+- **Nhật ký chuyến đi** (📊): quãng đường, thời gian, tốc độ tối đa, thời gian bám xe < 1 giây, số lần cảnh báo nguy hiểm, thời gian vượt tốc độ. Lưu trong máy.
 - **Tự chuyển giao diện ban đêm** theo độ sáng camera (chữ cam trên nền đen).
 - Nhẹ hơn: camera 640×360, nhận dạng xe ~8 lần/giây, dò vạch ~20 lần/giây.
 - **Cảnh báo âm thanh** khi khoảng cách nhỏ hơn mức an toàn theo tốc độ GPS (TT 38/2024/TT-BGTVT: 60 km/h → 35 m, ≤80 → 55 m, ≤100 → 70 m, ≤120 → 100 m) hoặc thời gian va chạm (TTC) < 4 s.

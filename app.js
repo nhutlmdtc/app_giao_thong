@@ -3,13 +3,14 @@
 // ===== Cấu hình =====
 const DEFAULTS = {
   fov: 70, cal: 1.0, hor: 50, hood: 12,
-  voice: true, laneWarn: true, beep: true, theme: 'auto', dbg: false,
+  voice: true, laneWarn: true, speedWarn: true, beep: true, theme: 'auto', dbg: false, autoHor: true,
 };
 const VEHICLE_WIDTH = { car: 1.8, truck: 2.5, bus: 2.5, motorcycle: 0.8 }; // m
 const LANE_WIDTH_M = 3.75;      // làn xe cao tốc (TCVN 5729:2012)
 const LANE_W = 320;             // độ phân giải khung xử lý vạch kẻ
 const DETECT_MIN_SCORE = 0.4;
 const DETECT_INTERVAL_MS = 125; // ~8 lần/giây: đủ cho cao tốc, đỡ nóng máy
+const DETECT_INTERVAL_SAVE_MS = 250; // chế độ tiết kiệm pin
 
 let cfg = loadCfg();
 
@@ -58,6 +59,11 @@ let debugPts = [];
 let showCamera = false;
 let brightness = 128;         // độ sáng trung bình khung hình (tự chuyển ngày/đêm)
 let departSince = 0;
+let overSince = 0;
+// Chân trời tự động (toạ độ khung nhỏ) + độ cao camera tự suy từ bề rộng làn
+const horizon = { y: null, camH: null };
+let battery = null;
+function powerSave() { return !!(battery && !battery.charging && battery.level < 0.2); }
 
 // ===== Khởi động =====
 $('btnStart').addEventListener('click', start);
@@ -65,6 +71,14 @@ $('btnSet').addEventListener('click', () => { bindSettings(); $('settings').hidd
 $('btnClose').addEventListener('click', () => { $('settings').hidden = true; saveCfg(); });
 $('btnReset').addEventListener('click', () => { cfg = { ...DEFAULTS }; saveCfg(); bindSettings(); });
 $('btnTest').addEventListener('click', () => voice.say('test', 'Giữ khoảng cách. Đang ở làn 2.', 0, 3));
+$('btnTrip').addEventListener('click', () => { renderTrips(); $('trips').hidden = false; });
+$('btnTripClose').addEventListener('click', () => { $('trips').hidden = true; });
+$('btnTripClear').addEventListener('click', () => {
+  if (!confirm('Xoá toàn bộ nhật ký chuyến đi?')) return;
+  try { localStorage.removeItem('trips'); } catch {}
+  trip.begin();
+  renderTrips();
+});
 $('btnCam').addEventListener('click', () => {
   showCamera = !showCamera;
   $('btnCam').style.outline = showCamera ? '2px solid var(--accent)' : '';
@@ -80,6 +94,8 @@ async function start() {
   } catch {}
   requestWakeLock();
   startGps();
+  trip.begin();
+  try { battery = await navigator.getBattery?.(); } catch {}
 
   try {
     status('Đang mở camera…');
@@ -184,7 +200,7 @@ async function detectLoop() {
       } catch {}
       updateTracks();
     }
-    const wait = DETECT_INTERVAL_MS - (performance.now() - t0);
+    const wait = (powerSave() ? DETECT_INTERVAL_SAVE_MS : DETECT_INTERVAL_MS) - (performance.now() - t0);
     await new Promise((r) => setTimeout(r, Math.max(0, wait)));
   }
 }
@@ -206,7 +222,8 @@ function detectLanes() {
   for (let i = 0; i < img.length; i += 4 * 97) { sum += img[i] + img[i + 1] + img[i + 2]; cnt += 3; }
   brightness = brightness * 0.98 + (sum / cnt) * 0.02;
 
-  const y0 = Math.round((cfg.hor / 100) * H) + 2;
+  const horY = cfg.autoHor && horizon.y != null ? horizon.y + H * 0.04 : (cfg.hor / 100) * H;
+  const y0 = Math.round(horY) + 2;
   const y1 = Math.round((1 - cfg.hood / 100) * H) - 1;
   if (y1 - y0 < 10) return;
 
@@ -262,10 +279,26 @@ function detectLanes() {
     lanes.right = smoothLine(lanes.right, right);
     lanes.lost = 0;
     lanes.H = H; lanes.W = W; lanes.y0 = y0; lanes.y1 = y1;
+    updateHorizon();
     trackLaneChange();
   } else if (++lanes.lost > 15) {
     lanes.left = lanes.right = null;
     prevOffset = null;
+  }
+}
+
+// Điểm tụ của 2 vạch = đường chân trời; độ cao camera = bề rộng làn × (y - chân trời) / bề rộng làn (px)
+function updateHorizon() {
+  const { left, right, H, y1 } = lanes;
+  const da = right.a - left.a;
+  if (da < 0.05) return;
+  const yv = (left.b - right.b) / da;
+  if (yv < H * 0.15 || yv > H * 0.75) return;
+  horizon.y = horizon.y == null ? yv : horizon.y + (yv - horizon.y) * 0.05;
+  const w = laneX(right, y1) - laneX(left, y1);
+  if (w > 4 && y1 - horizon.y > 5) {
+    const h = Math.min(2.5, Math.max(0.7, (LANE_WIDTH_M * (y1 - horizon.y)) / w));
+    horizon.camH = horizon.camH == null ? h : horizon.camH + (h - horizon.camH) * 0.05;
   }
 }
 
@@ -340,7 +373,7 @@ function trackLaneChange() {
 
 function laneLabel() {
   const r = roadMap.road;
-  const mapInfo = r ? [r.ref || r.name, r.lanes ? `${r.lanes} làn (bản đồ)` : ''].filter(Boolean).join(' · ') : '';
+  const mapInfo = r && r.lanes ? `${r.lanes} làn (bản đồ)` : '';
   if (!lanesOk()) return ['--', 'Đang dò vạch kẻ đường' + (mapInfo ? '\n' + mapInfo : '')];
   const { leftSolid: ls, rightSolid: rs } = lanes;
   const tot = laneTotal ? `/${laneTotal}` : '';
@@ -372,14 +405,19 @@ const roadMap = {
     if (!this.prev || distM(this.prev, pos) > 15) this.prev = pos;
 
     const now = Date.now();
-    if (!this.busy && now > this.failUntil && (!this.center || distM(this.center, pos) > 1000)) this.load(pos);
+    if (!this.busy && now > this.failUntil && (!this.center || distM(this.center, pos) > this.radius * 0.6)) this.load(pos);
     this.match(pos);
+    area.onPosition(pos);
+    trip.onPosition(pos, c.accuracy);
   },
 
+  radius: 1500,
   async load(pos) {
     this.busy = true;
-    const q = `[out:json][timeout:15];way(around:1500,${pos.lat.toFixed(5)},${pos.lon.toFixed(5)})` +
-      `[highway~"^(motorway|motorway_link|trunk|trunk_link|primary)$"];out tags geom;`;
+    // Chạy nhanh (cao tốc): tải rộng; chạy chậm (phố): tải hẹp vì đường nhỏ rất dày
+    const r = speedKmh != null && speedKmh > 50 ? 1500 : 400;
+    const q = `[out:json][timeout:15];way(around:${r},${pos.lat.toFixed(5)},${pos.lon.toFixed(5)})` +
+      `[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|motorway_link|trunk_link|primary_link|secondary_link|tertiary_link)$"];out tags geom;`;
     for (const url of OVERPASS) {
       try {
         const ctl = new AbortController();
@@ -391,6 +429,7 @@ const roadMap = {
         const js = await res.json();
         this.ways = js.elements.filter((e) => e.type === 'way' && e.geometry && e.geometry.length > 1);
         this.center = pos;
+        this.radius = r;
         this.busy = false;
         this.match(pos);
         return;
@@ -427,7 +466,7 @@ const roadMap = {
       }
       if (this.heading != null) score += Math.min(diff, 180 - diff) * 0.2;
       if (!best || score < best.score) {
-        best = { score, lanes, name: t.name || '', ref: t.ref || '', maxspeed: parseInt(t.maxspeed) || null };
+        best = { score, lanes, name: t.name || '', ref: t.ref || '', maxspeed: parseInt(t.maxspeed) || null, hw: t.highway };
       }
     }
     const before = this.road?.lanes;
@@ -438,6 +477,39 @@ const roadMap = {
     }
   },
 };
+
+// ===== Xã/phường, tỉnh theo vị trí (Nominatim — tra địa chỉ của OpenStreetMap) =====
+// Tra lại khi đi > 2 km; Nominatim giới hạn 1 lượt/giây nên tần suất này rất thấp.
+const area = {
+  at: null, text: '', road: '', busy: false, failUntil: 0,
+  onPosition(pos) {
+    if (this.busy || Date.now() < this.failUntil || (this.at && distM(this.at, pos) < 2000)) return;
+    this.load(pos);
+  },
+  async load(pos) {
+    this.busy = true;
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=16&addressdetails=1&accept-language=vi` +
+        `&lat=${pos.lat.toFixed(5)}&lon=${pos.lon.toFixed(5)}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(res.status);
+      const a = (await res.json()).address || {};
+      const low = a.quarter || a.suburb || a.village || a.town || a.city_district || a.municipality || a.county || '';
+      const prov = a.state || a.city || a.province || '';
+      this.text = [low, prov].filter((x, i, arr) => x && arr.indexOf(x) === i).join(' · ');
+      this.road = a.road || '';
+      this.at = pos;
+    } catch { this.failUntil = Date.now() + 60000; }
+    this.busy = false;
+  },
+};
+
+// Tên đường hiển thị: số hiệu + tên (ưu tiên đoạn khớp theo hướng chạy, nếu không có thì lấy từ Nominatim)
+function roadTitle() {
+  const r = roadMap.road;
+  if (r && (r.ref || r.name)) return [r.ref, r.name].filter(Boolean).join(' · ');
+  return area.road;
+}
 
 function distM(a, b) {
   const k = Math.cos((a.lat * Math.PI) / 180);
@@ -475,9 +547,13 @@ function estimate(d, vw) {
     if (by > lanes.y0 - 10 && wl > 4) Dl = (focalPx(LANE_W) * LANE_WIDTH_M) / wl;
     if (wl > 4) lat = (bx - (xl + xr) / 2) / wl;
   }
+  // Khoảng cách theo mặt đường (chân trời + độ cao camera): dùng được cả cho xe làn bên, xe ở xa
+  let Dg = null;
+  if (horizon.y != null && horizon.camH && by - horizon.y > 2) Dg = (focalPx(LANE_W) * horizon.camH) / (by - horizon.y);
+  const Dground = Dl || Dg;
   let D;
-  if (Dl && Dw) D = Dl / Dw > 0.6 && Dl / Dw < 1.6 ? 0.6 * Dl + 0.4 * Dw : Dw;
-  else D = Dw || Dl;
+  if (Dground && Dw) D = Dground / Dw > 0.6 && Dground / Dw < 1.6 ? 0.6 * Dground + 0.4 * Dw : Dw;
+  else D = Dw || Dground;
   if (!D) return null;
   D *= cfg.cal;
   if (lat == null) lat = (((bx - LANE_W / 2) / focalPx(LANE_W)) * D) / LANE_WIDTH_M;
@@ -508,14 +584,40 @@ function updateTracks() {
   tracks = next;
 
   const cand = tracks.filter((t) => Math.abs(t.lat) < 0.55 && now - t.t < 0.7).sort((a, b) => a.D - b.D)[0];
-  if (!cand) { if (lead && now - lead.t > 1) { lead = null; closingSpeed = 0; } return; }
+  if (!cand) { if (lead && now - lead.t > 1) { lead = null; closingSpeed = 0; kf.reset(); } return; }
 
-  if (lead && Math.abs(cand.D - lead.D) / lead.D < 0.35) {
-    const dt = Math.max(0.05, now - lead.t);
-    closingSpeed = closingSpeed * 0.85 + ((lead.D - cand.D) / dt) * 0.15;
-  } else closingSpeed = 0;
-  lead = { D: cand.D, t: now, box: cand.box, track: cand };
+  // Xe trước đổi sang xe khác (nhảy > 35%) thì khởi tạo lại bộ lọc
+  if (!lead || Math.abs(cand.D - lead.D) / lead.D > 0.35) kf.reset();
+  const D = kf.update(cand.D, now);
+  closingSpeed = -kf.v;
+  lead = { D, t: now, box: cand.box, track: cand };
 }
+
+// Bộ lọc Kalman 1 chiều (khoảng cách + tốc độ tương đối), mô hình vận tốc không đổi
+const kf = {
+  D: null, v: 0, t: 0, P: [[1, 0], [0, 1]],
+  reset() { this.D = null; this.v = 0; },
+  update(z, t) {
+    const r = (0.07 * z) ** 2 + 0.25;         // nhiễu đo tăng theo khoảng cách
+    if (this.D == null) { this.D = z; this.v = 0; this.t = t; this.P = [[r, 0], [0, 25]]; return z; }
+    const dt = Math.min(1, Math.max(0.02, t - this.t));
+    this.t = t;
+    // Dự đoán
+    this.D += this.v * dt;
+    const q = 9; // (3 m/s²)²: xe trước có thể phanh/tăng tốc
+    const [[a, b], [c, d]] = this.P;
+    const p00 = a + dt * (b + c) + dt * dt * d + (q * dt ** 4) / 4;
+    const p01 = b + dt * d + (q * dt ** 3) / 2;
+    const p10 = c + dt * d + (q * dt ** 3) / 2;
+    const p11 = d + q * dt * dt;
+    // Cập nhật
+    const s = p00 + r, k0 = p00 / s, k1 = p10 / s, y = z - this.D;
+    this.D += k0 * y;
+    this.v += k1 * y;
+    this.P = [[(1 - k0) * p00, (1 - k0) * p01], [p10 - k1 * p00, p11 - k1 * p01]];
+    return this.D;
+  },
+};
 
 // ===== Mức cảnh báo =====
 function alertLevel() {
@@ -547,6 +649,13 @@ function handleAlerts(level) {
   // Xe trước phanh gấp: đang tiến lại > 15 km/h trong tầm gần
   const safe = safeDistance(speedKmh) || 50;
   if (lead && closingSpeed > 4 && lead.D < safe * 1.5) voice.say('brake', 'Xe phía trước giảm tốc', 8, 2);
+  // Vượt tốc độ (theo giới hạn trên bản đồ) liên tục 3 s
+  const lim = roadMap.road?.maxspeed;
+  if (lim && speedKmh != null && speedKmh > lim + 5) {
+    if (!overSince) overSince = now;
+    else if (cfg.speedWarn && now - overSince > 3000) voice.say('speed', `Vượt tốc độ, giới hạn ${lim}`, 30, 1);
+  } else overSince = 0;
+  if (level === 'bad' && lastLevel !== 'bad' && trip.data) trip.data.badCount++;
   lastLevel = level;
 }
 
@@ -572,8 +681,11 @@ function render() {
   const now = performance.now(), dt = Math.min(0.1, (now - lastT) / 1000);
   lastT = now;
   if (video.readyState < 2) return;
-  if (frame++ % 3 === 0) detectLanes();
-  if (frame % 30 === 0) applyTheme();
+  if (frame++ % (powerSave() ? 5 : 3) === 0) detectLanes();
+  if (frame % 30 === 0) {
+    applyTheme();
+    if (powerSave()) status('🔋 Pin yếu · đang chạy chế độ tiết kiệm');
+  }
 
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const cw = Math.round(innerWidth * dpr), ch = Math.round(innerHeight * dpr);
@@ -595,6 +707,7 @@ function render() {
   }
 
   handleAlerts(level);
+  trip.tick(dt, level);
   updateHud(level, C);
 }
 
@@ -768,7 +881,8 @@ function drawCamera(cw, ch, dpr, level, C) {
   const H = lanes.H || Math.round((LANE_W * vh) / vw);
   vctx.strokeStyle = '#0ff'; vctx.lineWidth = 2 * dpr;
   vctx.setLineDash([8 * dpr, 8 * dpr]);
-  for (const yy of [(cfg.hor / 100) * H, (1 - cfg.hood / 100) * H]) {
+  const hy = cfg.autoHor && horizon.y != null ? horizon.y : (cfg.hor / 100) * H;
+  for (const yy of [hy, (1 - cfg.hood / 100) * H]) {
     const [, py] = P(0, yy);
     vctx.beginPath(); vctx.moveTo(0, py); vctx.lineTo(cw, py); vctx.stroke();
   }
@@ -787,6 +901,76 @@ function drawCamera(cw, ch, dpr, level, C) {
       vctx.fillStyle = C[level];
       vctx.fillText(lead.D.toFixed(0) + ' m', ox + d.x * s, oy + d.y * s - 8 * dpr);
     }
+  }
+}
+
+// ===== Nhật ký chuyến đi (lưu trong máy) =====
+const trip = {
+  data: null, last: null, saveT: 0,
+  begin() {
+    this.data = { id: Date.now(), start: Date.now(), end: Date.now(), km: 0, maxSpeed: 0,
+      closeSec: 0, warnSec: 0, badCount: 0, overSec: 0, driveSec: 0 };
+  },
+  onPosition(pos, acc) {
+    if (!this.data) return;
+    if (this.last && (acc == null || acc < 30)) {
+      const d = distM(this.last, pos);
+      if (d > 3 && d < 500) this.data.km += d / 1000;
+    }
+    this.last = pos;
+  },
+  tick(dt, level) {
+    const t = this.data;
+    if (!t) return;
+    const moving = speedKmh != null && speedKmh > 10;
+    if (moving) {
+      t.driveSec += dt;
+      t.maxSpeed = Math.max(t.maxSpeed, speedKmh);
+      if (lead && lead.D / (speedKmh / 3.6) < 1) t.closeSec += dt;   // bám dưới 1 giây
+      if (level !== 'ok') t.warnSec += dt;
+      const lim = roadMap.road?.maxspeed;
+      if (lim && speedKmh > lim + 5) t.overSec += dt;
+    }
+    t.end = Date.now();
+    if (t.end - this.saveT > 15000) this.save();
+  },
+  save() {
+    this.saveT = Date.now();
+    if (!this.data || this.data.driveSec < 30) return; // chuyến quá ngắn thì không lưu
+    try {
+      const all = JSON.parse(localStorage.getItem('trips') || '[]').filter((x) => x.id !== this.data.id);
+      all.unshift(this.data);
+      localStorage.setItem('trips', JSON.stringify(all.slice(0, 30)));
+    } catch {}
+  },
+  list() { try { return JSON.parse(localStorage.getItem('trips') || '[]'); } catch { return []; } },
+};
+addEventListener('pagehide', () => trip.save());
+
+function fmtDur(sec) {
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+  return h ? `${h} giờ ${m} phút` : m ? `${m} phút ${s2} giây` : `${s2} giây`;
+}
+function renderTrips() {
+  trip.save();
+  const rows = trip.list();
+  if (trip.data && !rows.some((x) => x.id === trip.data.id)) rows.unshift(trip.data);
+  const el = $('tripList');
+  el.textContent = '';
+  if (!rows.length) { el.textContent = 'Chưa có chuyến nào.'; return; }
+  for (const t of rows) {
+    const d = document.createElement('div');
+    d.className = 'trip';
+    const pct = t.driveSec ? Math.round((t.closeSec / t.driveSec) * 100) : 0;
+    const when = new Date(t.start).toLocaleString('vi-VN', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit' });
+    d.innerHTML = `<b></b><div></div>`;
+    d.querySelector('b').textContent = `${when}${trip.data && t.id === trip.data.id ? ' · đang chạy' : ''}`;
+    d.querySelector('div').textContent =
+      `${t.km.toFixed(1)} km · ${fmtDur(t.driveSec)} · tối đa ${Math.round(t.maxSpeed)} km/h\n` +
+      `Bám xe < 1 giây: ${fmtDur(t.closeSec)} (${pct}%) · Cảnh báo nguy hiểm: ${t.badCount} lần` +
+      (t.overSec ? `\nVượt tốc độ: ${fmtDur(t.overSec)}` : '');
+    el.appendChild(d);
   }
 }
 
@@ -822,6 +1006,8 @@ function updateHud(level, C) {
   setText('speedUnit', 'km/h · GPS' + (lim ? ` · giới hạn ${lim}` : ''));
   $('speedVal').style.color = lim && speedKmh > lim + 2 ? palette.bad : '';
 
+  setText('road', roadTitle() || '');
+  setText('area', area.text || '');
   const [n, sub] = laneLabel();
   setText('laneName', n);
   setText('laneSub', sub);
@@ -855,7 +1041,7 @@ function bindSettings() {
     el.value = cfg[id]; out.textContent = cfg[id];
     el.oninput = () => { cfg[id] = parseFloat(el.value); out.textContent = el.value; };
   }
-  for (const id of ['voice', 'laneWarn', 'beep', 'dbg']) {
+  for (const id of ['voice', 'laneWarn', 'speedWarn', 'beep', 'dbg', 'autoHor']) {
     const el = $(id);
     el.checked = cfg[id];
     el.onchange = () => { cfg[id] = el.checked; };

@@ -36,6 +36,11 @@
   .strip .ln.me { background:var(--accent); border-color:var(--accent); }
   .strip .bar { width:6px; background:var(--warn); border-radius:3px; }
   .strip .more { color:var(--dim); font-size:22px; align-self:center; }
+  #road { font-size:16px; font-weight:700; line-height:1.25; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; }
+  #area { font-size:13px; color:var(--dim); margin-top:2px; }
+  #road:empty + #area:empty { display:none; }
+  .trip { border-top:1px solid #333; padding:10px 0; font-size:14px; }
+  .trip div { white-space:pre-line; opacity:.85; margin-top:4px; line-height:1.5; }
   #laneName { font-size:22px; font-weight:800; line-height:1.15; }
   #laneSub { font-size:14px; color:var(--dim); margin-top:4px; white-space:pre-line; }
   #speedBox { margin-top:auto; }
@@ -75,6 +80,10 @@
 <canvas id="view"></canvas>
 
 <div id="left" class="panel">
+  <div>
+    <div id="road"></div>
+    <div id="area"></div>
+  </div>
   <div id="strip" class="strip"></div>
   <div>
     <div id="laneName">--</div>
@@ -92,6 +101,7 @@
 
 <div class="btns">
   <button id="btnCam" aria-label="Xem camera thật">📷</button>
+  <button id="btnTrip" aria-label="Nhật ký chuyến đi">📊</button>
   <button id="btnSet" aria-label="Cài đặt">⚙</button>
 </div>
 <div id="status">Đang khởi động…</div>
@@ -116,6 +126,7 @@
     <h3>Cảnh báo</h3>
     <label class="chk"><input id="voice" type="checkbox"> Giọng nói tiếng Việt</label>
     <label class="chk"><input id="laneWarn" type="checkbox"> Nhắc khi lệch làn</label>
+    <label class="chk"><input id="speedWarn" type="checkbox"> Nhắc khi vượt tốc độ (theo bản đồ)</label>
     <label class="chk"><input id="beep" type="checkbox"> Tiếng bíp khi nguy hiểm</label>
     <button id="btnTest" class="ghost">Thử giọng nói</button>
 
@@ -135,7 +146,8 @@
     <label>Hệ số hiệu chỉnh khoảng cách: <b id="calV"></b></label>
     <input id="cal" type="range" min="0.6" max="1.6" step="0.01">
     <div class="row"><span>App báo xa hơn thực → giảm</span><span>báo gần hơn → tăng</span></div>
-    <label>Đường chân trời: <b id="horV"></b>%</label>
+    <label class="chk"><input id="autoHor" type="checkbox"> Tự dò đường chân trời từ vạch kẻ</label>
+    <label>Đường chân trời (khi tắt tự dò): <b id="horV"></b>%</label>
     <input id="hor" type="range" min="30" max="70" step="1">
     <label>Che nắp capo (đáy khung hình): <b id="hoodV"></b>%</label>
     <input id="hood" type="range" min="0" max="35" step="1">
@@ -143,6 +155,16 @@
 
     <button id="btnClose" class="primary">Xong</button>
     <button id="btnReset" class="ghost">Khôi phục mặc định</button>
+  </div>
+</div>
+
+<div id="trips" class="sheet" hidden>
+  <div class="card">
+    <h2>Nhật ký chuyến đi</h2>
+    <p>Lưu trong máy, không gửi đi đâu. Giữ 30 chuyến gần nhất.</p>
+    <div id="tripList"></div>
+    <button id="btnTripClose" class="primary">Đóng</button>
+    <button id="btnTripClear" class="ghost">Xoá nhật ký</button>
   </div>
 </div>
 
