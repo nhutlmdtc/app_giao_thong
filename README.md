@@ -7,6 +7,7 @@ Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau đ�
 - **Màn hình mô phỏng phối cảnh 3D kiểu Tesla** (không hiện ảnh thật): làn đường, xe mình, xe trước, các xe làn bên, mốc mét và vùng màu an toàn trên mặt đường. Nút 📷 để xem ảnh thật khi hiệu chỉnh.
 - **Số chính là số giây cách xe trước** (khi có GPS), kèm số mét và khoảng cách an toàn; viền màn hình đổi xanh/vàng/đỏ.
 - **Cảnh báo giọng nói tiếng Việt**: "Giữ khoảng cách", "Nguy hiểm, giảm tốc", "Xe phía trước giảm tốc", "Xe đang lệch trái/phải", "Làn N".
+- **Tổng số làn và giới hạn tốc độ lấy từ bản đồ OpenStreetMap** theo vị trí GPS + hướng chạy (tách đúng nhánh cao tốc mỗi chiều). Tải dữ liệu bán kính 1,5 km, đi quá 1 km thì tải lại; mất mạng thì dùng cách dò vạch như cũ.
 - **Tự chuyển giao diện ban đêm** theo độ sáng camera (chữ cam trên nền đen).
 - Nhẹ hơn: camera 640×360, nhận dạng xe ~8 lần/giây, dò vạch ~20 lần/giây.
 - **Cảnh báo âm thanh** khi khoảng cách nhỏ hơn mức an toàn theo tốc độ GPS (TT 38/2024/TT-BGTVT: 60 km/h → 35 m, ≤80 → 55 m, ≤100 → 70 m, ≤120 → 100 m) hoặc thời gian va chạm (TTC) < 4 s.

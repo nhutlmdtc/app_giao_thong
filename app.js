@@ -125,6 +125,7 @@ function startGps() {
     (p) => {
       const s = p.coords.speed;
       speedKmh = s == null || isNaN(s) ? null : s * 3.6;
+      roadMap.onPosition(p.coords);
     },
     () => { speedKmh = null; },
     { enableHighAccuracy: true, maximumAge: 1000 }
@@ -315,9 +316,16 @@ function trackLaneChange() {
   lanes.offset = offset;
   const ls = left.covS > 0.62, rs = right.covS > 0.62;
   lanes.leftSolid = ls; lanes.rightSolid = rs;
-  if (ls) laneIndex = 1; // vạch liền bên trái = sát dải phân cách giữa
-  if (rs && laneIndex) laneTotal = laneIndex;
-  if (laneTotal && laneIndex > laneTotal) laneTotal = null;
+  const mapTotal = roadMap.road?.lanes || null;
+  if (ls) laneIndex = 1;                          // vạch liền bên trái = sát dải phân cách giữa
+  else if (rs && mapTotal) laneIndex = mapTotal;  // vạch liền bên phải + biết tổng số làn = làn ngoài cùng
+  if (mapTotal) {
+    laneTotal = mapTotal;
+    if (laneIndex > mapTotal) laneIndex = mapTotal;
+  } else {
+    if (rs && laneIndex) laneTotal = laneIndex;
+    if (laneTotal && laneIndex > laneTotal) laneTotal = null;
+  }
   if (before != null && laneIndex !== before) voice.say('lane', `Làn ${laneIndex}`, 3, 1);
 
   // Lệch làn: lệch > 1/3 làn liên tục 1,2 s
@@ -331,16 +339,124 @@ function trackLaneChange() {
 }
 
 function laneLabel() {
-  if (!lanesOk()) return ['--', 'Đang dò vạch kẻ đường'];
+  const r = roadMap.road;
+  const mapInfo = r ? [r.ref || r.name, r.lanes ? `${r.lanes} làn (bản đồ)` : ''].filter(Boolean).join(' · ') : '';
+  if (!lanesOk()) return ['--', 'Đang dò vạch kẻ đường' + (mapInfo ? '\n' + mapInfo : '')];
   const { leftSolid: ls, rightSolid: rs } = lanes;
+  const tot = laneTotal ? `/${laneTotal}` : '';
   let name;
   if (ls && rs) name = 'Làn duy nhất';
-  else if (ls) name = 'Làn 1 · trong cùng';
-  else if (rs) name = (laneIndex ? `Làn ${laneIndex} · ` : '') + 'ngoài cùng';
-  else name = laneIndex ? `Làn ${laneIndex} · giữa` : 'Làn giữa';
+  else if (ls) name = `Làn 1${tot} · trong cùng`;
+  else if (rs) name = (laneIndex ? `Làn ${laneIndex}${tot} · ` : '') + 'ngoài cùng';
+  else name = laneIndex ? `Làn ${laneIndex}${tot} · giữa` : 'Làn giữa';
   let sub = `Trái ${ls ? 'liền' : 'đứt'} · Phải ${rs ? 'liền' : 'đứt'}`;
   if (Math.abs(lanes.offset) > 0.25) sub += lanes.offset > 0 ? ' · lệch trái' : ' · lệch phải';
+  if (mapInfo) sub += '\n' + mapInfo;
   return [name, sub];
+}
+
+// ===== Số làn từ bản đồ OpenStreetMap (Overpass API) =====
+// Tải các đoạn đường lớn trong bán kính 1,5 km, rồi mỗi lần có GPS thì khớp tại chỗ
+// với đoạn gần nhất cùng hướng chạy. Đi xa > 1 km so với điểm tải thì tải lại.
+const OVERPASS = ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter'];
+const roadMap = {
+  ways: [], center: null, busy: false, failUntil: 0,
+  road: null,                  // {lanes, name, ref, maxspeed}
+  prev: null, heading: null,
+
+  onPosition(c) {
+    const pos = { lat: c.latitude, lon: c.longitude };
+    // Hướng chạy: ưu tiên GPS, nếu không có thì tính từ 2 điểm liên tiếp
+    if (c.heading != null && !isNaN(c.heading) && (c.speed || 0) > 2) this.heading = c.heading;
+    else if (this.prev && distM(this.prev, pos) > 15) this.heading = bearing(this.prev, pos);
+    if (!this.prev || distM(this.prev, pos) > 15) this.prev = pos;
+
+    const now = Date.now();
+    if (!this.busy && now > this.failUntil && (!this.center || distM(this.center, pos) > 1000)) this.load(pos);
+    this.match(pos);
+  },
+
+  async load(pos) {
+    this.busy = true;
+    const q = `[out:json][timeout:15];way(around:1500,${pos.lat.toFixed(5)},${pos.lon.toFixed(5)})` +
+      `[highway~"^(motorway|motorway_link|trunk|trunk_link|primary)$"];out tags geom;`;
+    for (const url of OVERPASS) {
+      try {
+        const ctl = new AbortController();
+        const timer = setTimeout(() => ctl.abort(), 15000);
+        const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), signal: ctl.signal,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        clearTimeout(timer);
+        if (!res.ok) throw new Error(res.status);
+        const js = await res.json();
+        this.ways = js.elements.filter((e) => e.type === 'way' && e.geometry && e.geometry.length > 1);
+        this.center = pos;
+        this.busy = false;
+        this.match(pos);
+        return;
+      } catch {}
+    }
+    this.busy = false;
+    this.failUntil = Date.now() + 60000; // mất mạng: thử lại sau 1 phút
+  },
+
+  match(pos) {
+    let best = null;
+    for (const w of this.ways) {
+      const t = w.tags || {};
+      // Tìm đoạn thẳng gần nhất của con đường
+      let dmin = Infinity, brg = 0;
+      for (let i = 1; i < w.geometry.length; i++) {
+        const a = w.geometry[i - 1], b = w.geometry[i];
+        const d = segDistM(pos, a, b);
+        if (d < dmin) { dmin = d; brg = bearing(a, b); }
+      }
+      if (dmin > 35) continue;
+      const oneway = t.oneway === 'yes' || t.oneway === '1' || t.oneway === '-1' ||
+        (t.highway === 'motorway' && t.oneway !== 'no') || t.junction === 'roundabout';
+      if (t.oneway === '-1') brg = (brg + 180) % 360;
+      let lanes = null, score = dmin;
+      const diff = this.heading == null ? 0 : angDiff(this.heading, brg);
+      if (oneway) {
+        if (this.heading != null && diff > 60) continue; // chiều ngược lại của cao tốc
+        lanes = parseInt(t.lanes) || null;
+      } else {
+        const fwd = diff < 90;
+        lanes = parseInt(t[fwd ? 'lanes:forward' : 'lanes:backward']) || (parseInt(t.lanes) ? Math.max(1, Math.floor(parseInt(t.lanes) / 2)) : null);
+        score += 5; // ưu tiên đường một chiều (cao tốc tách 2 nhánh)
+      }
+      if (this.heading != null) score += Math.min(diff, 180 - diff) * 0.2;
+      if (!best || score < best.score) {
+        best = { score, lanes, name: t.name || '', ref: t.ref || '', maxspeed: parseInt(t.maxspeed) || null };
+      }
+    }
+    const before = this.road?.lanes;
+    this.road = best;
+    if (best?.lanes && best.lanes !== before) {
+      laneTotal = best.lanes;
+      if (laneIndex > best.lanes) laneIndex = best.lanes;
+    }
+  },
+};
+
+function distM(a, b) {
+  const k = Math.cos((a.lat * Math.PI) / 180);
+  return Math.hypot((b.lon - a.lon) * k * 111320, (b.lat - a.lat) * 110540);
+}
+function bearing(a, b) {
+  const k = Math.cos((a.lat * Math.PI) / 180);
+  const dx = (b.lon - a.lon) * k, dy = b.lat - a.lat;
+  return ((Math.atan2(dx, dy) * 180) / Math.PI + 360) % 360;
+}
+function angDiff(a, b) { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+// Khoảng cách (m) từ p đến đoạn thẳng ab
+function segDistM(p, a, b) {
+  const k = Math.cos((p.lat * Math.PI) / 180);
+  const ax = (a.lon - p.lon) * k * 111320, ay = (a.lat - p.lat) * 110540;
+  const bx = (b.lon - p.lon) * k * 111320, by = (b.lat - p.lat) * 110540;
+  const dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy;
+  const t = L ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L)) : 0;
+  return Math.hypot(ax + t * dx, ay + t * dy);
 }
 
 // ===== Ước lượng vị trí các xe =====
@@ -519,12 +635,16 @@ function drawSim(cw, ch, dpr, level, C, dt) {
   const LW = LANE_WIDTH_M;
   const hasL = lanesOk();
   const ls = hasL && lanes.leftSolid, rs = hasL && lanes.rightSolid;
-  const roadL = ls ? -LW / 2 : -LW * 1.5, roadR = rs ? LW / 2 : LW * 1.5;
+  // Số làn hai bên: biết vị trí + tổng số làn thì vẽ đủ, không thì vẽ 1 làn mỗi bên
+  const known = hasL && laneIndex && laneTotal;
+  const nL = known ? laneIndex - 1 : ls ? 0 : 1, nR = known ? laneTotal - laneIndex : rs ? 0 : 1;
+  const edgeL = ls || !!known, edgeR = rs || !!known; // biết chắc mép đường
+  const roadL = -LW / 2 - nL * LW, roadR = LW / 2 + nR * LW;
   const zNear = -EGO_LEN - 8;
 
   // Dải phân cách / lề, mặt đường
-  if (ls) groundQuad(roadL - 3, roadL, zNear, FAR_Z, 'rgba(148,163,184,.10)');
-  if (rs) groundQuad(roadR, roadR + 3, zNear, FAR_Z, 'rgba(148,163,184,.06)');
+  if (edgeL) groundQuad(roadL - 3, roadL, zNear, FAR_Z, 'rgba(148,163,184,.10)');
+  if (edgeR) groundQuad(roadR, roadR + 3, zNear, FAR_Z, 'rgba(148,163,184,.06)');
   groundQuad(roadL, roadR, zNear, FAR_Z, 'rgba(148,163,184,.16)');
 
   // Vùng màu khoảng cách trên làn mình
@@ -546,8 +666,14 @@ function drawSim(cw, ch, dpr, level, C, dt) {
   };
   line(-LW / 2, ls, ls ? '#facc15' : C.fg);
   line(LW / 2, rs, C.fg);
-  if (!ls) line(-LW * 1.5, false, C.dim);
-  if (!rs) line(LW * 1.5, false, C.dim);
+  for (let i = 1; i <= nL; i++) {
+    const outer = i === nL;
+    line(-LW / 2 - i * LW, outer && edgeL, outer && edgeL ? '#facc15' : C.dim);
+  }
+  for (let i = 1; i <= nR; i++) {
+    const outer = i === nR;
+    line(LW / 2 + i * LW, outer && edgeR, C.dim);
+  }
 
   // Mốc khoảng cách
   vctx.fillStyle = C.dim;
@@ -565,7 +691,7 @@ function drawSim(cw, ch, dpr, level, C, dt) {
   // Xe: vẽ xa trước, gần sau
   const now = performance.now() / 1000;
   const cars = tracks
-    .filter((t) => now - t.t <= 0.7 && t.D < FAR_Z && Math.abs(t.lat) < 1.8)
+    .filter((t) => now - t.t <= 0.7 && t.D < FAR_Z && Math.abs(t.lat) < 4)
     .sort((a, b) => b.D - a.D);
   for (const t of cars) {
     const isLead = lead && t === lead.track;
@@ -692,6 +818,9 @@ function updateHud(level, C) {
   $('alertTxt').style.color = C[level];
 
   setText('speedVal', speedKmh == null ? '--' : String(Math.round(speedKmh)));
+  const lim = roadMap.road?.maxspeed;
+  setText('speedUnit', 'km/h · GPS' + (lim ? ` · giới hạn ${lim}` : ''));
+  $('speedVal').style.color = lim && speedKmh > lim + 2 ? palette.bad : '';
 
   const [n, sub] = laneLabel();
   setText('laneName', n);
@@ -708,6 +837,9 @@ function updateHud(level, C) {
         html += '<div class="bar"></div>';
         for (let i = 1; i <= total; i++) html += `<div class="ln${i === laneIndex ? ' me' : ''}"></div>`;
         html += laneTotal ? '' : '<div class="more">…</div>';
+      } else if (laneTotal) {
+        html += '<div class="bar"></div>';
+        for (let i = 1; i <= laneTotal; i++) html += '<div class="ln"></div>';
       } else {
         html += '<div class="more">…</div><div class="ln me"></div>' + (lanes.rightSolid ? '' : '<div class="more">…</div>');
       }

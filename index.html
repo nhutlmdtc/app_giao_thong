@@ -37,7 +37,7 @@
   .strip .bar { width:6px; background:var(--warn); border-radius:3px; }
   .strip .more { color:var(--dim); font-size:22px; align-self:center; }
   #laneName { font-size:22px; font-weight:800; line-height:1.15; }
-  #laneSub { font-size:14px; color:var(--dim); margin-top:4px; }
+  #laneSub { font-size:14px; color:var(--dim); margin-top:4px; white-space:pre-line; }
   #speedBox { margin-top:auto; }
   #speedVal { font-size:52px; font-weight:800; line-height:1; font-variant-numeric:tabular-nums; }
   .unit { font-size:14px; color:var(--dim); }
@@ -80,7 +80,7 @@
     <div id="laneName">--</div>
     <div id="laneSub">Đang dò vạch kẻ đường</div>
   </div>
-  <div id="speedBox"><div id="speedVal">--</div><div class="unit">km/h · GPS</div></div>
+  <div id="speedBox"><div id="speedVal">--</div><div id="speedUnit" class="unit">km/h · GPS</div></div>
 </div>
 
 <div id="right" class="panel">
