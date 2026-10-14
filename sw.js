@@ -1,6 +1,6 @@
 // Cache app + thư viện + mô hình để dùng được khi sóng yếu trên cao tốc
-const CACHE = 'caotoc-v5';
-const SHELL = ['./', 'index.html', 'app.js', 'manifest.json', 'icon.svg'];
+const CACHE = 'caotoc-v6';
+const SHELL = ['./', 'index.html', 'app.js', 'cars.js', 'sim3d.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

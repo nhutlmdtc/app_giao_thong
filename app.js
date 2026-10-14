@@ -3,6 +3,7 @@
 // ===== Cấu hình =====
 const DEFAULTS = {
   fov: 70, cal: 1.0, hor: 50, hood: 12,
+  carBrand: 'Khác', carModel: 'Sedan', carColor: '#f1f3f5',
   voice: true, laneWarn: true, speedWarn: true, beep: true, theme: 'auto', dbg: false, autoHor: true,
 };
 const VEHICLE_WIDTH = { car: 1.8, truck: 2.5, bus: 2.5, motorcycle: 0.8 }; // m
@@ -59,6 +60,8 @@ let debugPts = [];
 let showCamera = false;
 let brightness = 128;         // độ sáng trung bình khung hình (tự chuyển ngày/đêm)
 let departSince = 0;
+let frameImg = null;          // khung nhỏ gần nhất (để lấy màu xe)
+let trackSeq = 0;
 let overSince = 0;
 // Chân trời tự động (toạ độ khung nhỏ) + độ cao camera tự suy từ bề rộng làn
 const horizon = { y: null, camH: null };
@@ -216,6 +219,7 @@ function detectLanes() {
   if (small.width !== W || small.height !== H) { small.width = W; small.height = H; }
   sctx.drawImage(video, 0, 0, W, H);
   const img = sctx.getImageData(0, 0, W, H).data;
+  frameImg = { img, W, H };
 
   // Độ sáng trung bình (lấy mẫu thưa) để tự chuyển giao diện ngày/đêm
   let sum = 0, cnt = 0;
@@ -555,7 +559,8 @@ function estimate(d, vw) {
   if (Dground && Dw) D = Dground / Dw > 0.6 && Dground / Dw < 1.6 ? 0.6 * Dground + 0.4 * Dw : Dw;
   else D = Dw || Dground;
   if (!D) return null;
-  D *= cfg.cal;
+  // Camera ở kính lái: trừ đoạn kính lái → cản trước để ra khoảng cách cản trước → đuôi xe trước
+  D = Math.max(0.5, D * cfg.cal - myCar().hood);
   if (lat == null) lat = (((bx - LANE_W / 2) / focalPx(LANE_W)) * D) / LANE_WIDTH_M;
   return { D, lat };
 }
@@ -574,10 +579,13 @@ function updateTracks() {
       const cost = Math.abs(t.D - e.D) / Math.max(5, t.D) + Math.abs(t.lat - e.lat);
       if (t.cls === d.cls && cost < 0.6 && cost < best) { best = cost; m = t; }
     }
+    const rgb = sampleColor(d, vw);
+    const tall = d.h / d.w > 0.9;
     if (m) {
       tracks.splice(tracks.indexOf(m), 1);
-      next.push({ cls: d.cls, box: d, t: now, D: m.D + (e.D - m.D) * 0.35, lat: m.lat + (e.lat - m.lat) * 0.35 });
-    } else next.push({ cls: d.cls, box: d, t: now, ...e });
+      const col = rgb && m.rgb ? m.rgb.map((c, i) => c + (rgb[i] - c) * 0.2) : rgb || m.rgb;
+      next.push({ id: m.id, cls: d.cls, box: d, t: now, tall, rgb: col, D: m.D + (e.D - m.D) * 0.35, lat: m.lat + (e.lat - m.lat) * 0.35 });
+    } else next.push({ id: ++trackSeq, cls: d.cls, box: d, t: now, tall, rgb, ...e });
   }
   // Giữ xe vừa mất dấu tối đa 0,7 s
   for (const t of tracks) if (now - t.t < 0.7) next.push(t);
@@ -618,6 +626,28 @@ const kf = {
     return this.D;
   },
 };
+
+// Màu trung bình phần thân sau xe (nắp cốp/cản); trời tối thì bỏ qua
+function sampleColor(d, vw) {
+  if (!frameImg || brightness < 55) return null;
+  const { img, W, H } = frameImg, k = W / vw;
+  const x0 = Math.max(0, Math.round((d.x + d.w * 0.3) * k)), x1 = Math.min(W - 1, Math.round((d.x + d.w * 0.7) * k));
+  const y0 = Math.max(0, Math.round((d.y + d.h * 0.45) * k)), y1 = Math.min(H - 1, Math.round((d.y + d.h * 0.7) * k));
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = (y * W + x) * 4;
+    r += img[i]; g += img[i + 1]; b += img[i + 2]; n++;
+  }
+  return n ? [r / n, g / n, b / n] : null;
+}
+const hex = (rgb) => '#' + rgb.map((c) => Math.round(Math.min(255, Math.max(0, c))).toString(16).padStart(2, '0')).join('');
+
+let myCarCache = null;
+function myCar() {
+  const k = cfg.carBrand + '|' + cfg.carModel;
+  if (!myCarCache || myCarCache.k !== k) myCarCache = { k, ...carSpec(cfg.carBrand, cfg.carModel) };
+  return myCarCache;
+}
 
 // ===== Mức cảnh báo =====
 function alertLevel() {
@@ -693,7 +723,10 @@ function render() {
 
   const level = alertLevel();
   const C = palette;
+  const use3D = !showCamera && window.Sim3D?.ready;
+  window.Sim3D?.setVisible(use3D);
   if (showCamera) drawCamera(cw, ch, dpr, level, C);
+  else if (use3D) draw3D(cw, ch, dpr, level, C, dt);
   else drawSim(cw, ch, dpr, level, C, dt);
 
   // Viền cả màn hình theo mức cảnh báo
@@ -709,6 +742,54 @@ function render() {
   handleAlerts(level);
   trip.tick(dt, level);
   updateHud(level, C);
+}
+
+// Cấu hình làn cho mô phỏng: số làn hai bên, biết mép đường hay chưa
+function laneConf() {
+  const hasL = lanesOk();
+  const ls = hasL && !!lanes.leftSolid, rs = hasL && !!lanes.rightSolid;
+  const known = !!(hasL && laneIndex && laneTotal);
+  return {
+    nL: known ? laneIndex - 1 : ls ? 0 : 1, nR: known ? laneTotal - laneIndex : rs ? 0 : 1,
+    edgeL: ls || known, edgeR: rs || known, ls, rs,
+  };
+}
+
+// Mô phỏng 3D (Three.js, sim3d.js) + chữ vẽ đè trên canvas 2D
+function draw3D(cw, ch, dpr, level, C, dt) {
+  vctx.clearRect(0, 0, cw, ch);
+  const portrait = ch > cw, W = innerWidth, H = innerHeight;
+  const rect = portrait
+    ? { x: 0, y: Math.round(H * 0.23), w: W, h: Math.round(H * 0.5) }
+    : { x: Math.round(W * 0.285), y: 0, w: Math.round(W * 0.43), h: H };
+  const now = performance.now() / 1000;
+  const car = myCar();
+  const res = window.Sim3D.render({
+    rect, bg: C.bg, ok: C.ok, warn: C.warn, bad: C.bad, night: document.body.dataset.theme === 'night',
+    lane: laneConf(), egoX: -(lanesOk() ? lanes.offset : 0) * LANE_WIDTH_M,
+    speedMs: (speedKmh || 0) / 3.6, dt, safe: safeDistance(speedKmh), level,
+    tracks: tracks.filter((t) => now - t.t <= 0.7 && t.D < 170 && Math.abs(t.lat) < 4)
+      .map((t) => ({ id: t.id, cls: t.cls, D: t.D, x: t.lat * LANE_WIDTH_M, tall: t.tall,
+        color: lead && t === lead.track && level !== 'ok' ? C[level] : t.rgb ? hex(t.rgb) : null })),
+    leadId: lead?.track?.id,
+    ego: { type: car.type, dims: car.dims, color: cfg.carColor },
+  });
+  // Mốc khoảng cách
+  vctx.fillStyle = C.dim;
+  vctx.textAlign = 'right';
+  vctx.font = `${12 * dpr}px system-ui`;
+  let lastY = Infinity;
+  for (const [m, x, y] of res.ticks) {
+    if (lastY - y < 14 || x < rect.x + 4) continue;
+    lastY = y;
+    vctx.fillText(m + ' m', x * dpr, y * dpr + 4 * dpr);
+  }
+  vctx.textAlign = 'left';
+  if (res.leadScreen && lead) {
+    vctx.fillStyle = C[level];
+    vctx.font = `bold ${20 * dpr}px system-ui`;
+    vctx.fillText(lead.D.toFixed(0) + ' m', res.leadScreen[0] * dpr, res.leadScreen[1] * dpr);
+  }
 }
 
 // Mô phỏng phối cảnh 3D (camera ảo phía sau, trên cao — kiểu màn hình Tesla)
@@ -1046,6 +1127,32 @@ function bindSettings() {
     el.checked = cfg[id];
     el.onchange = () => { cfg[id] = el.checked; };
   }
+  // Xe của bạn
+  const bSel = $('carBrand'), mSel = $('carModel'), cIn = $('carColor'), sw = $('carSwatches');
+  const fillModels = () => {
+    mSel.textContent = '';
+    for (const [name] of CAR_BRANDS[bSel.value] || []) mSel.add(new Option(name, name));
+    if ([...mSel.options].some((o) => o.value === cfg.carModel)) mSel.value = cfg.carModel;
+    cfg.carModel = mSel.value;
+  };
+  if (!bSel.options.length) for (const b of Object.keys(CAR_BRANDS)) bSel.add(new Option(b, b));
+  bSel.value = CAR_BRANDS[cfg.carBrand] ? cfg.carBrand : 'Khác';
+  fillModels();
+  bSel.onchange = () => { cfg.carBrand = bSel.value; fillModels(); };
+  mSel.onchange = () => { cfg.carModel = mSel.value; };
+  cIn.value = cfg.carColor;
+  cIn.oninput = () => { cfg.carColor = cIn.value; markSwatch(); };
+  const markSwatch = () => sw.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.c === cfg.carColor));
+  if (!sw.children.length) {
+    for (const [name, c] of CAR_COLORS) {
+      const b = document.createElement('button');
+      b.type = 'button'; b.title = name; b.dataset.c = c; b.style.background = c;
+      b.onclick = () => { cfg.carColor = c; cIn.value = c; markSwatch(); };
+      sw.appendChild(b);
+    }
+  }
+  markSwatch();
+
   const th = $('theme');
   th.value = cfg.theme;
   th.onchange = () => { cfg.theme = th.value; applyTheme(); };

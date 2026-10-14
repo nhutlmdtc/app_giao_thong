@@ -7,5 +7,6 @@
 
 PWA "Cao Tốc Assist" (index.html, app.js, sw.js), host GitHub Pages qua `.github/workflows/pages.yml`.
 - Nhận dạng xe: TensorFlow.js COCO-SSD; dò vạch kẻ: xử lý ảnh thuần JS; số làn/giới hạn tốc độ: OpenStreetMap (Overpass).
-- Mô phỏng phối cảnh 3D vẽ bằng Canvas 2D (không dùng ảnh camera), cảnh báo giọng nói tiếng Việt.
+- Mô phỏng 3D: sim3d.js (Three.js, module ES, mô hình xe tự dựng); cars.js là bảng hãng/dòng xe. Bản vẽ Canvas 2D trong app.js là dự phòng.
+- Cảnh báo giọng nói tiếng Việt; tên đường (Overpass) + xã/tỉnh (Nominatim); nhật ký chuyến đi lưu localStorage.
 - Đổi file cache thì tăng phiên bản `CACHE` trong sw.js.

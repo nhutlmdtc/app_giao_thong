@@ -13,6 +13,8 @@ Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau đ�
 - **Bộ lọc Kalman** cho khoảng cách và tốc độ tiến lại gần xe trước → ít cảnh báo nhầm.
 - **Nhắc vượt tốc độ** bằng giọng nói theo giới hạn trên bản đồ; **tự giảm tải khi pin < 20%** (không sạc).
 - **Nhật ký chuyến đi** (📊): quãng đường, thời gian, tốc độ tối đa, thời gian bám xe < 1 giây, số lần cảnh báo nguy hiểm, thời gian vượt tốc độ. Lưu trong máy.
+- **Mô phỏng 3D bằng Three.js** (sim3d.js): xe mình theo **hãng / dòng / màu** chọn trong ⚙ (bảng ~90 dòng xe phổ biến tại VN trong cars.js, kích thước tương đối theo kiểu thân), xe khác dựng theo loại (con/SUV/tải/khách/máy) và **tô màu thật** lấy từ camera. Không tải được Three.js thì tự dùng bản vẽ 2D.
+- Khoảng cách hiển thị là **từ cản trước xe mình** tới đuôi xe trước (đã trừ đoạn kính lái → cản trước theo kiểu xe).
 - **Tự chuyển giao diện ban đêm** theo độ sáng camera (chữ cam trên nền đen).
 - Nhẹ hơn: camera 640×360, nhận dạng xe ~8 lần/giây, dò vạch ~20 lần/giây.
 - **Cảnh báo âm thanh** khi khoảng cách nhỏ hơn mức an toàn theo tốc độ GPS (TT 38/2024/TT-BGTVT: 60 km/h → 35 m, ≤80 → 55 m, ≤100 → 70 m, ≤120 → 100 m) hoặc thời gian va chạm (TTC) < 4 s.
