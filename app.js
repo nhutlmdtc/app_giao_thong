@@ -482,123 +482,138 @@ function render() {
   updateHud(level, C);
 }
 
-// Mô phỏng nhìn từ trên xuống
+// Mô phỏng phối cảnh 3D (camera ảo phía sau, trên cao — kiểu màn hình Tesla)
+const CAM_H = 9;       // m: độ cao camera ảo
+const CAM_BACK = 25;   // m: camera ảo lùi sau đầu xe mình
+const EGO_LEN = 4.5;
+const FAR_Z = 160;
+
 function drawSim(cw, ch, dpr, level, C, dt) {
   const portrait = ch > cw;
   vctx.fillStyle = C.bg;
   vctx.fillRect(0, 0, cw, ch);
 
-  // Vùng đường
-  const rx0 = portrait ? cw * 0.04 : cw * 0.3, rx1 = portrait ? cw * 0.96 : cw * 0.7;
-  const ry0 = portrait ? ch * 0.27 : ch * 0.08, ry1 = portrait ? ch * 0.8 : ch * 0.97;
+  const rx0 = portrait ? 0 : cw * 0.29, rx1 = portrait ? cw : cw * 0.71;
+  const ry0 = portrait ? ch * 0.26 : 0, ry1 = portrait ? ch * 0.82 : ch;
   const cx = (rx0 + rx1) / 2;
-  const laneW = (rx1 - rx0) / 3.4;
-  const pxPerM = laneW / LANE_WIDTH_M; // ngang
+  const hy = ry0 + (ry1 - ry0) * 0.16;                        // đường chân trời
+  const f = (ry1 - hy) * (CAM_BACK - EGO_LEN - 6) / CAM_H;    // tiêu cự ảo: đáy khung = 6 m sau đuôi xe mình
+  // (X ngang m, Z phía trước m, Y cao m) -> pixel
+  const P = (X, Z, Y = 0) => { const d = Math.max(0.5, Z + CAM_BACK); return [cx + (f * X) / d, hy + (f * (CAM_H - Y)) / d]; };
+  const quad = (pts, fill) => {
+    vctx.fillStyle = fill;
+    vctx.beginPath();
+    pts.forEach((p, i) => (i ? vctx.lineTo(p[0], p[1]) : vctx.moveTo(p[0], p[1])));
+    vctx.closePath(); vctx.fill();
+  };
+  const groundQuad = (xa, xb, za, zb, fill) => quad([P(xa, za), P(xb, za), P(xb, zb), P(xa, zb)], fill);
 
-  const safe = safeDistance(speedKmh);
-  const maxD = Math.min(150, Math.max(60, (safe || 50) * 1.5, lead ? lead.D * 1.2 : 0));
-  const ew = 1.8 * pxPerM, egoLen = Math.min(ew * 2.1, (ry1 - ry0) * 0.16);
-  const egoY = ry1 - egoLen - 6 * dpr;
-  const yOf = (D) => egoY - (D / maxD) * (egoY - ry0);
+  vctx.save();
+  vctx.beginPath(); vctx.rect(rx0, ry0, rx1 - rx0, ry1 - ry0); vctx.clip();
 
+  // Nền trời mờ phía chân trời
+  const sky = vctx.createLinearGradient(0, ry0, 0, hy + 20 * dpr);
+  sky.addColorStop(0, 'rgba(56,189,248,0)'); sky.addColorStop(1, 'rgba(56,189,248,.08)');
+  vctx.fillStyle = sky; vctx.fillRect(rx0, ry0, rx1 - rx0, hy - ry0 + 20 * dpr);
+
+  const LW = LANE_WIDTH_M;
   const hasL = lanesOk();
   const ls = hasL && lanes.leftSolid, rs = hasL && lanes.rightSolid;
-  const roadL = cx - laneW * (ls ? 0.5 : 1.5), roadR = cx + laneW * (rs ? 0.5 : 1.5);
+  const roadL = ls ? -LW / 2 : -LW * 1.5, roadR = rs ? LW / 2 : LW * 1.5;
+  const zNear = -EGO_LEN - 8;
 
-  // Dải phân cách / lề
-  if (ls) { vctx.fillStyle = 'rgba(148,163,184,.12)'; vctx.fillRect(rx0, ry0, roadL - rx0, ry1 - ry0); }
-  if (rs) { vctx.fillStyle = 'rgba(148,163,184,.06)'; vctx.fillRect(roadR, ry0, rx1 - roadR, ry1 - ry0); }
-
-  // Mặt đường
-  vctx.fillStyle = 'rgba(148,163,184,.16)';
-  vctx.fillRect(roadL, ry0, roadR - roadL, ry1 - ry0);
+  // Dải phân cách / lề, mặt đường
+  if (ls) groundQuad(roadL - 3, roadL, zNear, FAR_Z, 'rgba(148,163,184,.10)');
+  if (rs) groundQuad(roadR, roadR + 3, zNear, FAR_Z, 'rgba(148,163,184,.06)');
+  groundQuad(roadL, roadR, zNear, FAR_Z, 'rgba(148,163,184,.16)');
 
   // Vùng màu khoảng cách trên làn mình
+  const safe = safeDistance(speedKmh);
   if (safe) {
-    const zones = [[0, safe * 0.6, C.bad], [safe * 0.6, safe, C.warn], [safe, maxD, C.ok]];
-    vctx.globalAlpha = 0.2;
-    for (const [a, b, col] of zones) {
-      vctx.fillStyle = col;
-      vctx.fillRect(cx - laneW / 2, yOf(Math.min(b, maxD)), laneW, yOf(a) - yOf(Math.min(b, maxD)));
+    vctx.globalAlpha = 0.28;
+    for (const [a, b, col] of [[0, safe * 0.6, C.bad], [safe * 0.6, safe, C.warn], [safe, FAR_Z, C.ok]]) {
+      groundQuad(-LW / 2, LW / 2, a, b, col);
     }
     vctx.globalAlpha = 1;
   }
 
-  // Vạch kẻ: chạy theo tốc độ xe
+  // Vạch kẻ (dải mỏng trên mặt đất, chạy theo tốc độ)
   dashPhase = (dashPhase + ((speedKmh || 0) / 3.6) * dt) % 12;
-  const drawLine = (x, solid, col) => {
-    vctx.strokeStyle = col;
-    vctx.lineWidth = 4 * dpr;
-    if (solid) {
-      vctx.beginPath(); vctx.moveTo(x, ry0); vctx.lineTo(x, ry1); vctx.stroke();
-    } else {
-      // vạch 5 m, hở 7 m (dài hơn thực tế để dễ nhìn khi thu nhỏ)
-      for (let m = -dashPhase; m < maxD + 12; m += 12) {
-        const ya = yOf(Math.max(0, m)), yb = yOf(Math.max(0, m + 5));
-        const y1c = Math.min(ya, ry1), y2c = Math.max(yb, ry0);
-        if (y1c <= y2c) continue;
-        vctx.beginPath(); vctx.moveTo(x, y1c); vctx.lineTo(x, y2c); vctx.stroke();
-      }
-    }
+  const line = (X, solid, col) => {
+    const w = 0.18;
+    if (solid) { groundQuad(X - w, X + w, zNear, FAR_Z, col); return; }
+    for (let z = zNear - dashPhase; z < FAR_Z; z += 12) groundQuad(X - w, X + w, z, z + 4, col);
   };
-  const yellow = '#facc15', white = C.fg;
-  drawLine(cx - laneW / 2, ls, ls ? yellow : white);
-  drawLine(cx + laneW / 2, rs, white);
-  if (!ls) drawLine(cx - laneW * 1.5, false, C.dim);
-  if (!rs) drawLine(cx + laneW * 1.5, false, C.dim);
+  line(-LW / 2, ls, ls ? '#facc15' : C.fg);
+  line(LW / 2, rs, C.fg);
+  if (!ls) line(-LW * 1.5, false, C.dim);
+  if (!rs) line(LW * 1.5, false, C.dim);
 
-  // Thước mét
+  // Mốc khoảng cách
   vctx.fillStyle = C.dim;
-  vctx.font = `${12 * dpr}px system-ui`;
   vctx.textAlign = 'right';
-  for (let m = 20; m < maxD; m += 20) {
-    const y = yOf(m);
-    vctx.fillRect(roadL - 10 * dpr, y, 6 * dpr, 1 * dpr);
-    vctx.fillText(m + ' m', roadL - 14 * dpr, y + 4 * dpr);
+  let lastY = Infinity;
+  for (let m = 20; m <= 100; m += 20) {
+    const [x, y] = P(roadL - 0.6, m);
+    if (lastY - y < 14 * dpr) continue; // quá sát chân trời thì bỏ
+    lastY = y;
+    vctx.font = `${Math.max(9, Math.min(14, 400 / (m + CAM_BACK))) * dpr}px system-ui`;
+    vctx.fillText(m + ' m', x, y + 4 * dpr);
   }
   vctx.textAlign = 'left';
 
-  // Xe khác
+  // Xe: vẽ xa trước, gần sau
   const now = performance.now() / 1000;
-  for (const t of tracks) {
-    if (now - t.t > 0.7 || t.D > maxD || Math.abs(t.lat) > 1.8) continue;
+  const cars = tracks
+    .filter((t) => now - t.t <= 0.7 && t.D < FAR_Z && Math.abs(t.lat) < 1.8)
+    .sort((a, b) => b.D - a.D);
+  for (const t of cars) {
     const isLead = lead && t === lead.track;
-    const x = cx + t.lat * laneW;
-    const w = VEHICLE_WIDTH[t.cls] * pxPerM;
     const big = t.cls === 'truck' || t.cls === 'bus';
-    const len = Math.min((big ? 2.6 : t.cls === 'motorcycle' ? 2.1 : 2) * w, (ry1 - ry0) * (big ? 0.2 : 0.14));
-    drawCar(x, yOf(t.D), w, len, isLead ? C[level] : C.dim, dpr);
+    const dim = big ? [2.5, 3.2, 10] : t.cls === 'motorcycle' ? [0.8, 1.4, 2] : [1.8, 1.45, 4.5];
+    box3d(P, quad, t.lat * LW, t.D, dim, isLead ? C[level] : C.dim);
     if (isLead) {
+      const [x, y] = P(t.lat * LW + dim[0] / 2 + 0.4, t.D, dim[1] / 2);
       vctx.fillStyle = C[level];
       vctx.font = `bold ${20 * dpr}px system-ui`;
-      vctx.fillText(t.D.toFixed(0) + ' m', x + w / 2 + 8 * dpr, yOf(t.D) - len / 2 + 8 * dpr);
+      vctx.fillText(t.D.toFixed(0) + ' m', x, y + 7 * dpr);
     }
   }
 
   // Xe mình (lệch trong làn theo offset)
-  const egoX = cx - (hasL ? lanes.offset : 0) * laneW;
-  drawCar(egoX, egoY + egoLen, ew, egoLen, C.accent, dpr);
+  box3d(P, quad, -(hasL ? lanes.offset : 0) * LW, -EGO_LEN, [1.8, 1.45, EGO_LEN], C.accent);
 
   if (!hasL) {
     vctx.fillStyle = C.dim;
     vctx.font = `${14 * dpr}px system-ui`;
     vctx.textAlign = 'center';
-    vctx.fillText('Chưa thấy vạch kẻ đường', cx, ry0 + 20 * dpr);
+    vctx.fillText('Chưa thấy vạch kẻ đường', cx, hy - 8 * dpr);
     vctx.textAlign = 'left';
   }
+  vctx.restore();
 }
 
-// Xe dạng hộp bo góc; (x, y) là tâm đầu xe phía sau (đuôi xe)
-function drawCar(x, y, w, len, col, dpr) {
-  const r = Math.min(w, len) * 0.25;
-  const left = x - w / 2, top = y - len;
-  vctx.fillStyle = col;
-  vctx.beginPath();
-  vctx.roundRect ? vctx.roundRect(left, top, w, len, r) : vctx.rect(left, top, w, len);
-  vctx.fill();
-  vctx.fillStyle = 'rgba(0,0,0,.35)'; // kính
-  vctx.fillRect(left + w * 0.15, top + len * 0.22, w * 0.7, len * 0.18);
-  vctx.fillRect(left + w * 0.15, top + len * 0.68, w * 0.7, len * 0.12);
+// Hộp 3D: X tâm ngang, Z đuôi xe (m phía trước), dim = [rộng, cao, dài]
+function box3d(P, quad, X, Z, [w, h, len], col) {
+  const xl = X - w / 2, xr = X + w / 2, z0 = Z, z1 = Z + len;
+  quad([P(xl, z0), P(xr, z0), P(xr, z1), P(xl, z1)], 'rgba(0,0,0,.35)'); // bóng
+  // Mặt bên hướng về tâm (thấy được khi xe ở làn bên)
+  if (xl > 0.05) quad([P(xl, z0), P(xl, z0, h), P(xl, z1, h), P(xl, z1)], col);
+  if (xr < -0.05) quad([P(xr, z0), P(xr, z0, h), P(xr, z1, h), P(xr, z1)], col);
+  if (xl > 0.05 || xr < -0.05) {
+    const s = xl > 0.05 ? xl : xr;
+    quad([P(s, z0), P(s, z0, h), P(s, z1, h), P(s, z1)], 'rgba(0,0,0,.35)');
+  }
+  // Nóc
+  quad([P(xl, z0, h), P(xr, z0, h), P(xr, z1, h), P(xl, z1, h)], col);
+  quad([P(xl, z0, h), P(xr, z0, h), P(xr, z1, h), P(xl, z1, h)], 'rgba(255,255,255,.22)');
+  // Mặt sau (đuôi xe)
+  quad([P(xl, z0), P(xr, z0), P(xr, z0, h), P(xl, z0, h)], col);
+  // Kính sau + đèn hậu
+  const g = (a, b, c, d) => [P(xl + w * a, z0, h * c), P(xl + w * b, z0, h * c), P(xl + w * b, z0, h * d), P(xl + w * a, z0, h * d)];
+  quad(g(0.12, 0.88, 0.62, 0.92), 'rgba(0,0,0,.4)');
+  quad(g(0.04, 0.22, 0.35, 0.5), 'rgba(239,68,68,.9)');
+  quad(g(0.78, 0.96, 0.35, 0.5), 'rgba(239,68,68,.9)');
 }
 
 // Chế độ xem camera thật (để hiệu chỉnh)

@@ -4,7 +4,7 @@ Web app (PWA) chạy trên trình duyệt điện thoại, dùng camera sau đ�
 
 - **Đo khoảng cách đến xe phía trước** trong làn của mình (COCO-SSD / TensorFlow.js).
 - **Nhận diện làn đường đang đi**: tô vùng làn, phân biệt vạch liền/đứt → làn trong cùng / giữa / ngoài cùng, đếm số làn khi chuyển làn, báo lệch làn.
-- **Màn hình mô phỏng nhìn từ trên xuống** (không hiện ảnh thật): làn đường, xe mình, xe trước, các xe làn bên, thước mét và vùng màu an toàn. Nút 📷 để xem ảnh thật khi hiệu chỉnh.
+- **Màn hình mô phỏng phối cảnh 3D kiểu Tesla** (không hiện ảnh thật): làn đường, xe mình, xe trước, các xe làn bên, mốc mét và vùng màu an toàn trên mặt đường. Nút 📷 để xem ảnh thật khi hiệu chỉnh.
 - **Số chính là số giây cách xe trước** (khi có GPS), kèm số mét và khoảng cách an toàn; viền màn hình đổi xanh/vàng/đỏ.
 - **Cảnh báo giọng nói tiếng Việt**: "Giữ khoảng cách", "Nguy hiểm, giảm tốc", "Xe phía trước giảm tốc", "Xe đang lệch trái/phải", "Làn N".
 - **Tự chuyển giao diện ban đêm** theo độ sáng camera (chữ cam trên nền đen).

@@ -1,5 +1,5 @@
 // Cache app + thư viện + mô hình để dùng được khi sóng yếu trên cao tốc
-const CACHE = 'caotoc-v2';
+const CACHE = 'caotoc-v3';
 const SHELL = ['./', 'index.html', 'app.js', 'manifest.json', 'icon.svg'];
 
 self.addEventListener('install', (e) => {
